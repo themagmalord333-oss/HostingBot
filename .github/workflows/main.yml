@@ -24,16 +24,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ffmpeg curl git unzip jq
 
-    - name: Clone Configured External Repo (If any)
-      env:
-        CLONE_URL: ${{ secrets.CLONE_GIT_URL }}
-      run: |
-        if [ -n "$CLONE_URL" ]; then
-          git clone "$CLONE_URL" repo_temp
-          cp -a repo_temp/. .
-          rm -rf repo_temp
-        fi
-
     - name: ⚙️ Generate Dynamic .env 
       env:
         SECRETS_JSON: ${{ toJSON(secrets) }}
@@ -41,54 +31,56 @@ jobs:
         echo "$SECRETS_JSON" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' | grep -v -i -E 'github_token|gh_personal_token' > .env
         echo "✅ Dynamic .env generated."
 
-    - name: Install Python Dependencies
+    - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pymongo dnspython python-dotenv
+        pip install pymongo dnspython python-dotenv pyrogram tgcrypto
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
     - name: 🛡️ Start Continuous MongoDB Heartbeat Lock
+      env:
+        MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
       run: |
-        cat << 'EOF' > hb_lock.py
-        import os, time, sys
-        from datetime import datetime, timedelta
-        from pymongo import MongoClient
-        from dotenv import load_dotenv
-        load_dotenv()
-        
-        if not os.getenv("MONGO_DB_URI"):
-            print("No MongoDB URI, bypassing lock system.")
-            sys.exit(0)
+        if [ -z "$MONGO_DB_URI" ]; then
+          echo "ℹ️ No MONGO_DB_URI provided. Skipping Heartbeat Lock."
+        else
+          cat << 'EOF' > hb_lock.py
+import os, time, sys
+from datetime import datetime, timedelta
+from pymongo import MongoClient
+from dotenv import load_dotenv
+load_dotenv()
 
-        try:
-            client = MongoClient(os.getenv("MONGO_DB_URI"))
-            lock_col = client["ultimate_host"]["bot_lock"]
-            
-            doc = lock_col.find_one({"_id": "main"})
-            if doc and doc.get("expire", datetime.utcnow()) > datetime.utcnow():
-                print("🔒 Another Bot is Running! Exiting.")
-                sys.exit(1)
-                
-            print("✅ Lock Acquired! Starting heartbeat...")
-            while True:
-                lock_col.update_one(
-                    {"_id": "main"},
-                    {"$set": {"expire": datetime.utcnow() + timedelta(seconds=90)}},
-                    upsert=True
-                )
-                time.sleep(45)
-        except Exception as e:
-            print("DB Error:", e)
-            sys.exit(0)
-        EOF
+try:
+    client = MongoClient(os.getenv("MONGO_DB_URI"))
+    lock_col = client["ultimate_host"]["bot_lock"]
+    
+    doc = lock_col.find_one({"_id": "main"})
+    if doc and doc.get("expire", datetime.utcnow()) > datetime.utcnow():
+        print("🔒 Another Bot is Running! Exiting.")
+        sys.exit(1)
         
-        python3 hb_lock.py &
-        echo $! > lock_pid.txt
-        sleep 4
-        
-        if ! kill -0 $(cat lock_pid.txt) 2>/dev/null; then
-           echo "⚠️ Overlapping Runner detected. Exiting gracefully."
-           exit 0
+    print("✅ Lock Acquired! Starting heartbeat...")
+    while True:
+        lock_col.update_one(
+            {"_id": "main"},
+            {"$set": {"expire": datetime.utcnow() + timedelta(seconds=90)}},
+            upsert=True
+        )
+        time.sleep(45)
+except Exception as e:
+    print("DB Error:", e)
+    sys.exit(1)
+EOF
+
+          python3 hb_lock.py &
+          echo $! > lock_pid.txt
+          sleep 4
+
+          if ! kill -0 $(cat lock_pid.txt) 2>/dev/null; then
+             echo "⚠️ Overlapping Runner detected or DB lock failed. Exiting gracefully."
+             exit 0
+          fi
         fi
 
     - name: 🚀 Execute Hosted Bot
@@ -111,4 +103,6 @@ jobs:
           fi
         fi
         
-        kill $(cat lock_pid.txt) 2>/dev/null || true
+        if [ -f "lock_pid.txt" ]; then
+          kill $(cat lock_pid.txt) 2>/dev/null || true
+        fi
