@@ -32,7 +32,7 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Setup System Essentials
+      - name: Setup System Dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -61,11 +61,11 @@ jobs:
 
           if [ -z "${CLONE_URL:-}" ]; then
             echo "No external repository configured."
-            echo "Skipping external repository clone."
+            echo "Skipping clone."
             exit 0
           fi
 
-          echo "Cloning configured external repository..."
+          echo "Cloning external repository..."
 
           git clone --depth 1 "$CLONE_URL" repo_temp
 
@@ -75,8 +75,11 @@ jobs:
 
           echo "External repository copied successfully."
 
-      - name: Generate Environment File
+      - name: Create Environment File
         env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
           RUN_COMMAND: ${{ secrets.RUN_COMMAND }}
         shell: bash
@@ -84,6 +87,29 @@ jobs:
           set -Eeuo pipefail
 
           rm -f .env
+
+          if [ -z "${API_ID:-}" ]; then
+            echo "ERROR: API_ID secret is missing."
+            exit 1
+          fi
+
+          if [ -z "${API_HASH:-}" ]; then
+            echo "ERROR: API_HASH secret is missing."
+            exit 1
+          fi
+
+          if [ -z "${BOT_TOKEN:-}" ]; then
+            echo "ERROR: BOT_TOKEN secret is missing."
+            exit 1
+          fi
+
+          if [ -z "${MONGO_DB_URI:-}" ]; then
+            echo "WARNING: MONGO_DB_URI is empty."
+          fi
+
+          printf 'API_ID=%s\n' "$API_ID" >> .env
+          printf 'API_HASH=%s\n' "$API_HASH" >> .env
+          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" >> .env
 
           if [ -n "${MONGO_DB_URI:-}" ]; then
             printf 'MONGO_DB_URI=%s\n' "$MONGO_DB_URI" >> .env
@@ -95,7 +121,7 @@ jobs:
 
           chmod 600 .env
 
-          echo ".env generated."
+          echo "Environment file created successfully."
 
       - name: Install Python Dependencies
         shell: bash
@@ -104,11 +130,6 @@ jobs:
 
           python -m pip install --upgrade pip
 
-          pip install \
-            pymongo \
-            dnspython \
-            python-dotenv
-
           if [ -f requirements.txt ]; then
             echo "Installing requirements.txt..."
             pip install -r requirements.txt
@@ -116,194 +137,7 @@ jobs:
             echo "No requirements.txt found."
           fi
 
-      - name: Acquire MongoDB Lock
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          cat > acquire_lock.py <<'PY'
-          import os
-          import sys
-          from datetime import datetime, timedelta, timezone
-
-          from dotenv import load_dotenv
-          from pymongo import MongoClient
-          from pymongo.errors import PyMongoError
-
-          load_dotenv()
-
-          uri = os.getenv("MONGO_DB_URI")
-
-          if not uri:
-              print("No MONGO_DB_URI configured.")
-              print("MongoDB lock is disabled.")
-              sys.exit(0)
-
-          try:
-              client = MongoClient(
-                  uri,
-                  serverSelectionTimeoutMS=10000,
-                  connectTimeoutMS=10000,
-              )
-
-              client.admin.command("ping")
-
-              collection = client["ultimate_host"]["bot_lock"]
-
-              now = datetime.now(timezone.utc)
-              expires = now + timedelta(seconds=90)
-
-              owner = os.getenv(
-                  "GITHUB_RUN_ID",
-                  "unknown"
-              )
-
-              result = collection.find_one_and_update(
-                  {
-                      "_id": "main",
-                      "$or": [
-                          {"expire": {"$lte": now}},
-                          {"expire": {"$exists": False}},
-                      ],
-                  },
-                  {
-                      "$set": {
-                          "expire": expires,
-                          "owner": owner,
-                      }
-                  },
-                  upsert=False,
-                  return_document=False,
-              )
-
-              if result is not None:
-                  print("Expired lock acquired.")
-                  print("LOCK_ACQUIRED")
-                  sys.exit(0)
-
-              try:
-                  collection.insert_one(
-                      {
-                          "_id": "main",
-                          "expire": expires,
-                          "owner": owner,
-                      }
-                  )
-
-                  print("New lock created.")
-                  print("LOCK_ACQUIRED")
-                  sys.exit(0)
-
-              except PyMongoError:
-                  print("Another runner already owns the lock.")
-                  sys.exit(2)
-
-          except PyMongoError as exc:
-              print(f"MongoDB error: {exc}")
-              print("Could not safely verify the lock.")
-              sys.exit(1)
-          PY
-
-          python acquire_lock.py
-
-          STATUS=$?
-
-          if [ "$STATUS" -eq 2 ]; then
-            echo "Another bot is already running."
-            echo "Exiting safely."
-            exit 0
-          fi
-
-          if [ "$STATUS" -ne 0 ]; then
-            echo "Could not acquire MongoDB lock."
-            exit 1
-          fi
-
-          echo "MongoDB lock acquired."
-
-      - name: Start MongoDB Heartbeat
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          cat > heartbeat.py <<'PY'
-          import os
-          import sys
-          import time
-          from datetime import datetime, timedelta, timezone
-
-          from dotenv import load_dotenv
-          from pymongo import MongoClient
-
-          load_dotenv()
-
-          uri = os.getenv("MONGO_DB_URI")
-
-          if not uri:
-              print("MongoDB disabled.")
-              sys.exit(0)
-
-          client = MongoClient(
-              uri,
-              serverSelectionTimeoutMS=10000,
-              connectTimeoutMS=10000,
-          )
-
-          collection = client["ultimate_host"]["bot_lock"]
-
-          owner = os.getenv(
-              "GITHUB_RUN_ID",
-              "unknown"
-          )
-
-          while True:
-              try:
-                  now = datetime.now(timezone.utc)
-                  expires = now + timedelta(seconds=90)
-
-                  result = collection.update_one(
-                      {
-                          "_id": "main",
-                          "owner": owner,
-                      },
-                      {
-                          "$set": {
-                              "expire": expires,
-                          }
-                      },
-                  )
-
-                  if result.matched_count != 1:
-                      print("LOCK LOST")
-                      sys.exit(1)
-
-                  print(
-                      f"[{datetime.now()}] "
-                      "MongoDB heartbeat OK"
-                  )
-
-                  time.sleep(45)
-
-              except Exception as exc:
-                  print(f"Heartbeat error: {exc}")
-                  sys.exit(1)
-          PY
-
-          nohup python heartbeat.py > heartbeat.log 2>&1 &
-
-          echo $! > heartbeat.pid
-
-          sleep 5
-
-          if ! kill -0 "$(cat heartbeat.pid)" 2>/dev/null; then
-            echo "Heartbeat failed to start."
-            cat heartbeat.log || true
-            exit 1
-          fi
-
-          echo "MongoDB heartbeat started."
-
-      - name: Execute Hosted Bot
+      - name: Start Hosted Bot
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -315,25 +149,22 @@ jobs:
           fi
 
           echo "=========================================="
-          echo "STARTING HOSTED BOT"
+          echo "        HOSTED BOT STARTING"
           echo "=========================================="
 
           if [ -n "${RUN_COMMAND:-}" ]; then
 
-            echo "Using custom RUN_COMMAND."
-
+            echo "Running custom command..."
             bash -c "$RUN_COMMAND"
 
           elif [ -f "main.py" ]; then
 
-            echo "Running main.py"
-
+            echo "Running main.py..."
             python3 main.py
 
           elif [ -f "bot.py" ]; then
 
-            echo "Running bot.py"
-
+            echo "Running bot.py..."
             python3 bot.py
 
           else
@@ -343,41 +174,26 @@ jobs:
                 -maxdepth 1 \
                 -type f \
                 -name "*.py" \
-                ! -name "acquire_lock.py" \
-                ! -name "heartbeat.py" \
+                ! -name "setup.py" \
                 | sort \
                 | head -n 1
             )
 
             if [ -n "$PY_FILE" ]; then
-
-              echo "Running: $PY_FILE"
-
+              echo "Running $PY_FILE..."
               python3 "$PY_FILE"
-
             else
-
-              echo "ERROR: No runnable Python file found."
+              echo "ERROR: No Python bot file found."
               exit 1
-
             fi
+
           fi
 
-      - name: Cleanup
+      - name: Bot Finished
         if: always()
         shell: bash
         run: |
-          echo "Cleaning up..."
-
-          if [ -f heartbeat.pid ]; then
-            kill "$(cat heartbeat.pid)" 2>/dev/null || true
-          fi
-
-          echo "Cleanup completed."
-
-      - name: Show Heartbeat Log
-        if: failure()
-        shell: bash
-        run: |
-          echo "========== HEARTBEAT LOG =========="
-          cat heartbeat.log 2>/dev/null || true
+          echo "=========================================="
+          echo "       HOSTED BOT RUN FINISHED"
+          echo "=========================================="
+          echo "The Auto Restart workflow will handle the next run."
