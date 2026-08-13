@@ -1,0 +1,114 @@
+name: Ultimate Deployer & Runner
+
+on:
+  repository_dispatch:
+    types: [run-hosted-bot]
+  workflow_dispatch:
+
+jobs:
+  run-hosted-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Setup System Essentials
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg curl git unzip jq
+
+    - name: Clone Configured External Repo (If any)
+      env:
+        CLONE_URL: ${{ secrets.CLONE_GIT_URL }}
+      run: |
+        if [ -n "$CLONE_URL" ]; then
+          git clone "$CLONE_URL" repo_temp
+          cp -a repo_temp/. .
+          rm -rf repo_temp
+        fi
+
+    - name: ⚙️ Generate Dynamic .env 
+      env:
+        SECRETS_JSON: ${{ toJSON(secrets) }}
+      run: |
+        echo "$SECRETS_JSON" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' | grep -v -i -E 'github_token|gh_personal_token' > .env
+        echo "✅ Dynamic .env generated."
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pymongo dnspython python-dotenv
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: 🛡️ Start Continuous MongoDB Heartbeat Lock
+      run: |
+        cat << 'EOF' > hb_lock.py
+        import os, time, sys
+        from datetime import datetime, timedelta
+        from pymongo import MongoClient
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        if not os.getenv("MONGO_DB_URI"):
+            print("No MongoDB URI, bypassing lock system.")
+            sys.exit(0)
+
+        try:
+            client = MongoClient(os.getenv("MONGO_DB_URI"))
+            lock_col = client["ultimate_host"]["bot_lock"]
+            
+            doc = lock_col.find_one({"_id": "main"})
+            if doc and doc.get("expire", datetime.utcnow()) > datetime.utcnow():
+                print("🔒 Another Bot is Running! Exiting.")
+                sys.exit(1)
+                
+            print("✅ Lock Acquired! Starting heartbeat...")
+            while True:
+                lock_col.update_one(
+                    {"_id": "main"},
+                    {"$set": {"expire": datetime.utcnow() + timedelta(seconds=90)}},
+                    upsert=True
+                )
+                time.sleep(45)
+        except Exception as e:
+            print("DB Error:", e)
+            sys.exit(0)
+        EOF
+        
+        python3 hb_lock.py &
+        echo $! > lock_pid.txt
+        sleep 4
+        
+        if ! kill -0 $(cat lock_pid.txt) 2>/dev/null; then
+           echo "⚠️ Overlapping Runner detected. Exiting gracefully."
+           exit 0
+        fi
+
+    - name: 🚀 Execute Hosted Bot
+      run: |
+        set -a; source .env; set +a
+        
+        if [ -n "$RUN_COMMAND" ]; then
+          echo "▶️ Custom Command: $RUN_COMMAND"
+          eval "$RUN_COMMAND"
+        elif [ -f "main.py" ]; then
+          python3 main.py
+        elif [ -f "bot.py" ]; then
+          python3 bot.py
+        else
+          PY_FILE=$(find . -maxdepth 1 -name "*.py" ! -name "hb_lock.py" | head -n 1)
+          if [ -n "$PY_FILE" ]; then
+            python3 "$PY_FILE"
+          else
+            echo "❌ No runnable file!"
+          fi
+        fi
+        
+        kill $(cat lock_pid.txt) 2>/dev/null || true
