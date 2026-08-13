@@ -8,7 +8,6 @@ on:
       - completed
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -21,9 +20,6 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # COOLDOWN
-      # ============================================================
       - name: Wait for Previous Runner
         shell: bash
         run: |
@@ -31,14 +27,10 @@ jobs:
           echo "Waiting 30 seconds..."
           sleep 30
 
-      # ============================================================
-      # START NEXT RUN
-      # ============================================================
       - name: Trigger Next Bot Run
         env:
           GH_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
           REPOSITORY: ${{ github.repository }}
-          EVENT_TYPE: run-hosted-bot
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -48,7 +40,7 @@ jobs:
             exit 1
           fi
 
-          echo "Starting next hosted bot run..."
+          echo "Triggering next bot run..."
 
           HTTP_CODE=$(
             curl \
@@ -61,17 +53,15 @@ jobs:
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "Content-Type: application/json" \
-              -d "{\"event_type\":\"${EVENT_TYPE}\"}"
+              -d '{"event_type":"run-hosted-bot"}'
           )
 
           echo "GitHub API HTTP status: $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "204" ]; then
             echo "ERROR: repository_dispatch failed."
-
             echo "Response:"
             cat response.json || true
-
             exit 1
           fi
 
