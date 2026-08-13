@@ -1,0 +1,96 @@
+name: Auto Restart Runner
+
+on:
+  workflow_run:
+    workflows:
+      - "Ultimate Deployer & Runner"
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: hosted-bot-auto-restart
+  cancel-in-progress: false
+
+jobs:
+  restart-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Wait For Previous Runner To Close
+        shell: bash
+        run: |
+          echo "Previous runner completed."
+          echo "Waiting 30 seconds..."
+          sleep 30
+
+      - name: Check For Existing Bot Run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "Checking for queued or running bot workflows..."
+
+          RUNNING=$(
+            gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "main.yml" \
+              --status in_progress \
+              --json databaseId \
+              --jq 'length'
+          )
+
+          QUEUED=$(
+            gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "main.yml" \
+              --status queued \
+              --json databaseId \
+              --jq 'length'
+          )
+
+          echo "Running: $RUNNING"
+          echo "Queued:  $QUEUED"
+
+          if [ "$RUNNING" -gt 0 ] || [ "$QUEUED" -gt 0 ]; then
+            echo "Another bot run already exists."
+            echo "No duplicate run will be started."
+
+            echo "start=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing bot run found."
+
+            echo "start=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start Next Bot Run
+        if: steps.check.outputs.start == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "=========================================="
+          echo "       STARTING NEXT BOT RUN"
+          echo "=========================================="
+
+          gh workflow run "main.yml" \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.event.repository.default_branch }}"
+
+          echo "Next bot run triggered successfully."
+
+      - name: Restart Not Required
+        if: steps.check.outputs.start == 'false'
+        shell: bash
+        run: |
+          echo "A bot run is already queued/running."
+          echo "Skipping duplicate restart."
