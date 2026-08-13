@@ -17,33 +17,21 @@ concurrency:
 jobs:
   run-hosted-bot:
     runs-on: ubuntu-latest
-
-    # GitHub-hosted runner ki limit se thoda pehle safely stop.
-    # Auto Restart next run start karega.
     timeout-minutes: 350
 
     steps:
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ============================================================
-      # PYTHON
-      # ============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: pip
 
-      # ============================================================
-      # SYSTEM PACKAGES
-      # ============================================================
       - name: Setup System Essentials
         shell: bash
         run: |
@@ -64,18 +52,20 @@ jobs:
           echo "FFmpeg:"
           ffmpeg -version | head -n 1
 
-      # ============================================================
-      # CLONE EXTERNAL REPOSITORY
-      # ============================================================
       - name: Clone Configured External Repo
-        if: ${{ secrets.CLONE_GIT_URL != '' }}
         env:
           CLONE_URL: ${{ secrets.CLONE_GIT_URL }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          echo "Cloning configured repository..."
+          if [ -z "${CLONE_URL:-}" ]; then
+            echo "No external repository configured."
+            echo "Skipping external repository clone."
+            exit 0
+          fi
+
+          echo "Cloning configured external repository..."
 
           git clone --depth 1 "$CLONE_URL" repo_temp
 
@@ -85,9 +75,6 @@ jobs:
 
           echo "External repository copied successfully."
 
-      # ============================================================
-      # CREATE .env
-      # ============================================================
       - name: Generate Environment File
         env:
           MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
@@ -108,11 +95,8 @@ jobs:
 
           chmod 600 .env
 
-          echo ".env generated safely."
+          echo ".env generated."
 
-      # ============================================================
-      # PYTHON DEPENDENCIES
-      # ============================================================
       - name: Install Python Dependencies
         shell: bash
         run: |
@@ -126,12 +110,12 @@ jobs:
             python-dotenv
 
           if [ -f requirements.txt ]; then
+            echo "Installing requirements.txt..."
             pip install -r requirements.txt
+          else
+            echo "No requirements.txt found."
           fi
 
-      # ============================================================
-      # MONGODB ATOMIC LOCK
-      # ============================================================
       - name: Acquire MongoDB Lock
         shell: bash
         run: |
@@ -152,7 +136,7 @@ jobs:
 
           if not uri:
               print("No MONGO_DB_URI configured.")
-              print("MongoDB lock disabled.")
+              print("MongoDB lock is disabled.")
               sys.exit(0)
 
           try:
@@ -169,8 +153,11 @@ jobs:
               now = datetime.now(timezone.utc)
               expires = now + timedelta(seconds=90)
 
-              # Atomic lock acquisition.
-              # Either this runner gets the lock or it doesn't.
+              owner = os.getenv(
+                  "GITHUB_RUN_ID",
+                  "unknown"
+              )
+
               result = collection.find_one_and_update(
                   {
                       "_id": "main",
@@ -182,47 +169,38 @@ jobs:
                   {
                       "$set": {
                           "expire": expires,
-                          "owner": os.getenv(
-                              "GITHUB_RUN_ID",
-                              "unknown"
-                          ),
+                          "owner": owner,
                       }
                   },
                   upsert=False,
                   return_document=False,
               )
 
-              if result is None:
-                  # Lock document may not exist yet.
-                  try:
-                      collection.insert_one(
-                          {
-                              "_id": "main",
-                              "expire": expires,
-                              "owner": os.getenv(
-                                  "GITHUB_RUN_ID",
-                                  "unknown"
-                              ),
-                          }
-                      )
+              if result is not None:
+                  print("Expired lock acquired.")
+                  print("LOCK_ACQUIRED")
+                  sys.exit(0)
 
-                      print("MongoDB lock created successfully.")
+              try:
+                  collection.insert_one(
+                      {
+                          "_id": "main",
+                          "expire": expires,
+                          "owner": owner,
+                      }
+                  )
 
-                  except PyMongoError:
-                      print(
-                          "Another runner already owns the MongoDB lock."
-                      )
-                      sys.exit(2)
+                  print("New lock created.")
+                  print("LOCK_ACQUIRED")
+                  sys.exit(0)
 
-              else:
-                  print("Existing expired lock acquired.")
-
-              print("LOCK_ACQUIRED")
-              sys.exit(0)
+              except PyMongoError:
+                  print("Another runner already owns the lock.")
+                  sys.exit(2)
 
           except PyMongoError as exc:
               print(f"MongoDB error: {exc}")
-              print("Failing safely instead of starting a duplicate bot.")
+              print("Could not safely verify the lock.")
               sys.exit(1)
           PY
 
@@ -232,21 +210,17 @@ jobs:
 
           if [ "$STATUS" -eq 2 ]; then
             echo "Another bot is already running."
-            echo "Stopping this runner safely."
-
+            echo "Exiting safely."
             exit 0
           fi
 
           if [ "$STATUS" -ne 0 ]; then
-            echo "Could not safely acquire MongoDB lock."
+            echo "Could not acquire MongoDB lock."
             exit 1
           fi
 
           echo "MongoDB lock acquired."
 
-      # ============================================================
-      # CONTINUOUS HEARTBEAT
-      # ============================================================
       - name: Start MongoDB Heartbeat
         shell: bash
         run: |
@@ -329,15 +303,16 @@ jobs:
 
           echo "MongoDB heartbeat started."
 
-      # ============================================================
-      # RUN BOT
-      # ============================================================
       - name: Execute Hosted Bot
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          source .env 2>/dev/null || true
+          if [ -f .env ]; then
+            set -a
+            source .env
+            set +a
+          fi
 
           echo "=========================================="
           echo "STARTING HOSTED BOT"
@@ -383,15 +358,11 @@ jobs:
             else
 
               echo "ERROR: No runnable Python file found."
-
               exit 1
 
             fi
           fi
 
-      # ============================================================
-      # CLEANUP
-      # ============================================================
       - name: Cleanup
         if: always()
         shell: bash
@@ -404,9 +375,6 @@ jobs:
 
           echo "Cleanup completed."
 
-      # ============================================================
-      # SHOW HEARTBEAT LOG ON FAILURE
-      # ============================================================
       - name: Show Heartbeat Log
         if: failure()
         shell: bash
