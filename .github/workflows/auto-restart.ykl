@@ -1,0 +1,21 @@
+name: Auto Restart Runner
+
+on:
+  workflow_run:
+    workflows: ["Ultimate Deployer & Runner"]
+    types:
+      - completed
+
+jobs:
+  restart-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⏳ Wait for 20 Seconds (Cooldown)
+        run: sleep 20
+
+      - name: 🔄 Trigger Next Bot Run
+        run: |
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.GH_PERSONAL_TOKEN }}" \
+          -d '{"event_type": "run-hosted-bot"}'
