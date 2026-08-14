@@ -5,8 +5,6 @@ import ast
 import sys
 import time
 import json
-import base64
-import asyncio
 import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -39,6 +37,15 @@ def safe_extract_zip(zip_path, extract_to):
             if not member_path.startswith(abs_extract_to):
                 raise ValueError(f"Security Alert: Path Traversal Detected in {member}")
         zip_ref.extractall(extract_to)
+    
+    # 🔥 YAHAN FIX KIYA HAI: Agar ZIP ke andar ek main folder hai, toh usko bahar nikal lo
+    extracted_items = os.listdir(extract_to)
+    if len(extracted_items) == 1:
+        single_folder = os.path.join(extract_to, extracted_items[0])
+        if os.path.isdir(single_folder):
+            for item in os.listdir(single_folder):
+                shutil.move(os.path.join(single_folder, item), extract_to)
+            os.rmdir(single_folder)
 
 def get_local_modules(bot_dir):
     local_modules = set()
@@ -132,16 +139,21 @@ async def callback_handler(client, query: CallbackQuery):
         bot_dir = state["dir"]
         entry_file = state["entry"]
         
-        # Purana process agar chal raha hai toh stop karo
+        # 🔥 YAHAN BHI FIX KIYA HAI: Direct sahi folder location set hoga
+        full_entry_path = os.path.join(bot_dir, entry_file)
+        actual_cwd = os.path.dirname(full_entry_path)
+        actual_entry_name = os.path.basename(full_entry_path)
+
         if user_id in RUNNING_PROCESSES:
             try: RUNNING_PROCESSES[user_id].terminate()
             except: pass
 
         await query.message.edit_text("🚀 Spawning process in background...")
         
-        cmd = [sys.executable if entry_file.endswith(".py") else "node", entry_file]
+        cmd = [sys.executable if actual_entry_name.endswith(".py") else "node", actual_entry_name]
         try:
-            process = subprocess.Popen(cmd, cwd=bot_dir)
+            # Sahi working directory (actual_cwd) use ho rahi hai ab
+            process = subprocess.Popen(cmd, cwd=actual_cwd)
             RUNNING_PROCESSES[user_id] = process
             await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
         except Exception as e:
