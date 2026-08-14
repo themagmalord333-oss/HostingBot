@@ -1,10 +1,9 @@
-name: Ultimate Deployer & Runner
+Name: Ultimate Deployer & Runner
 
 on:
   repository_dispatch:
     types:
       - run-hosted-bot
-
   workflow_dispatch:
 
 permissions:
@@ -20,7 +19,6 @@ jobs:
     timeout-minutes: 350
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -36,19 +34,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           sudo apt-get update
-
-          sudo apt-get install -y \
-            ffmpeg \
-            curl \
-            git \
-            unzip \
-            jq
-
+          sudo apt-get install -y ffmpeg curl git unzip jq
           echo "Python:"
           python --version
-
           echo "FFmpeg:"
           ffmpeg -version | head -n 1
 
@@ -58,24 +47,57 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           if [ -z "${CLONE_URL:-}" ]; then
             echo "No external repository configured."
             echo "Skipping clone."
             exit 0
           fi
-
           echo "Cloning external repository..."
-
           git clone --depth 1 "$CLONE_URL" repo_temp
-
           cp -a repo_temp/. .
-
           rm -rf repo_temp
-
           echo "External repository copied successfully."
 
-      - name: Create Environment File
+      - name: Create Environment File (Backup)
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
+          RUN_COMMAND: ${{ secrets.RUN_COMMAND }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f .env
+          
+          # Basic Validation
+          if [ -z "${API_ID:-}" ]; then echo "ERROR: API_ID secret is missing."; exit 1; fi
+          if [ -z "${API_HASH:-}" ]; then echo "ERROR: API_HASH secret is missing."; exit 1; fi
+          if [ -z "${BOT_TOKEN:-}" ]; then echo "ERROR: BOT_TOKEN secret is missing."; exit 1; fi
+          
+          # Write to .env just in case the python script strictly requires the file on disk
+          printf 'API_ID=%s\n' "$API_ID" >> .env
+          printf 'API_HASH=%s\n' "$API_HASH" >> .env
+          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" >> .env
+          if [ -n "${MONGO_DB_URI:-}" ]; then printf 'MONGO_DB_URI=%s\n' "$MONGO_DB_URI" >> .env; fi
+          if [ -n "${RUN_COMMAND:-}" ]; then printf 'RUN_COMMAND=%s\n' "$RUN_COMMAND" >> .env; fi
+          chmod 600 .env
+          echo "Environment file created successfully."
+
+      - name: Install Python Dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            echo "Installing requirements.txt..."
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found."
+          fi
+
+      - name: Start Hosted Bot
+        # 🚀 FIX YAHAN HAI: Secrets direct is step ko pass kar diye hain!
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
@@ -86,99 +108,21 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          rm -f .env
-
-          if [ -z "${API_ID:-}" ]; then
-            echo "ERROR: API_ID secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${API_HASH:-}" ]; then
-            echo "ERROR: API_HASH secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${BOT_TOKEN:-}" ]; then
-            echo "ERROR: BOT_TOKEN secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${MONGO_DB_URI:-}" ]; then
-            echo "WARNING: MONGO_DB_URI is empty."
-          fi
-
-          printf 'API_ID=%s\n' "$API_ID" >> .env
-          printf 'API_HASH=%s\n' "$API_HASH" >> .env
-          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" >> .env
-
-          if [ -n "${MONGO_DB_URI:-}" ]; then
-            printf 'MONGO_DB_URI=%s\n' "$MONGO_DB_URI" >> .env
-          fi
-
-          if [ -n "${RUN_COMMAND:-}" ]; then
-            printf 'RUN_COMMAND=%s\n' "$RUN_COMMAND" >> .env
-          fi
-
-          chmod 600 .env
-
-          echo "Environment file created successfully."
-
-      - name: Install Python Dependencies
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          python -m pip install --upgrade pip
-
-          if [ -f requirements.txt ]; then
-            echo "Installing requirements.txt..."
-            pip install -r requirements.txt
-          else
-            echo "No requirements.txt found."
-          fi
-
-      - name: Start Hosted Bot
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          if [ -f .env ]; then
-            set -a
-            source .env
-            set +a
-          fi
-
           echo "=========================================="
           echo "        HOSTED BOT STARTING"
           echo "=========================================="
 
           if [ -n "${RUN_COMMAND:-}" ]; then
-
             echo "Running custom command..."
             bash -c "$RUN_COMMAND"
-
           elif [ -f "main.py" ]; then
-
             echo "Running main.py..."
             python3 main.py
-
           elif [ -f "bot.py" ]; then
-
             echo "Running bot.py..."
             python3 bot.py
-
           else
-
-            PY_FILE=$(
-              find . \
-                -maxdepth 1 \
-                -type f \
-                -name "*.py" \
-                ! -name "setup.py" \
-                | sort \
-                | head -n 1
-            )
-
+            PY_FILE=$(find . -maxdepth 1 -type f -name "*.py" ! -name "setup.py" | sort | head -n 1)
             if [ -n "$PY_FILE" ]; then
               echo "Running $PY_FILE..."
               python3 "$PY_FILE"
@@ -186,7 +130,6 @@ jobs:
               echo "ERROR: No Python bot file found."
               exit 1
             fi
-
           fi
 
       - name: Bot Finished
