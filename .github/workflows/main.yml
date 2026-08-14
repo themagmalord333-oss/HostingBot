@@ -1,139 +1,372 @@
-name: Ultimate Deployer & Runner
+name: MAGMA Music API
 
 on:
+  workflow_dispatch:
+
   repository_dispatch:
     types:
-      - run-hosted-bot
-  workflow_dispatch:
+      - run-api
+
+  schedule:
+    # Every 5 hours.
+    # If the previous run is still running, the new run waits.
+    - cron: "0 */5 * * *"
+
+# IMPORTANT:
+# Only ONE API run can execute at a time.
+# A new run waits instead of killing the current one.
+concurrency:
+  group: magma-api-runner
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: hosted-bot-runner
-  cancel-in-progress: false
-
 jobs:
-  run-hosted-bot:
+  run-api:
+    name: Run MAGMA API
     runs-on: ubuntu-latest
+
+    # GitHub-hosted runner maximum is 6 hours.
+    # Keep a little safety margin.
     timeout-minutes: 350
 
     steps:
+
+      # --------------------------------------------------
+      # 1. CHECKOUT
+      # --------------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Set up Python
+      # --------------------------------------------------
+      # 2. PYTHON
+      # --------------------------------------------------
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: pip
 
-      - name: Setup System Dependencies
+      # --------------------------------------------------
+      # 3. SYSTEM DEPENDENCIES
+      # --------------------------------------------------
+      - name: Install System Dependencies
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -e
+
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl git unzip jq
-          echo "Python:"
-          python --version
-          echo "FFmpeg:"
-          ffmpeg -version | head -n 1
 
-      - name: Clone Configured External Repo
-        env:
-          CLONE_URL: ${{ secrets.CLONE_GIT_URL }}
+          sudo apt-get install -y \
+            ffmpeg \
+            curl \
+            wget \
+            git \
+            jq \
+            unzip
+
+          echo "================================="
+          echo "System dependencies installed"
+          echo "================================="
+
+      # --------------------------------------------------
+      # 4. INSTALL NGROK
+      # --------------------------------------------------
+      - name: Install Ngrok
         shell: bash
         run: |
-          set -Eeuo pipefail
-          if [ -z "${CLONE_URL:-}" ]; then
-            echo "No external repository configured."
-            echo "Skipping clone."
-            exit 0
-          fi
-          echo "Cloning external repository..."
-          git clone --depth 1 "$CLONE_URL" repo_temp
-          cp -a repo_temp/. .
-          rm -rf repo_temp
-          echo "External repository copied successfully."
+          set -e
 
-      - name: Create Environment File (Backup)
-        env:
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
-          RUN_COMMAND: ${{ secrets.RUN_COMMAND }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          rm -f .env
-          
-          if [ -z "${API_ID:-}" ]; then echo "ERROR: API_ID secret is missing."; exit 1; fi
-          if [ -z "${API_HASH:-}" ]; then echo "ERROR: API_HASH secret is missing."; exit 1; fi
-          if [ -z "${BOT_TOKEN:-}" ]; then echo "ERROR: BOT_TOKEN secret is missing."; exit 1; fi
-          
-          printf 'API_ID=%s\n' "$API_ID" >> .env
-          printf 'API_HASH=%s\n' "$API_HASH" >> .env
-          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" >> .env
-          if [ -n "${MONGO_DB_URI:-}" ]; then printf 'MONGO_DB_URI=%s\n' "$MONGO_DB_URI" >> .env; fi
-          if [ -n "${RUN_COMMAND:-}" ]; then printf 'RUN_COMMAND=%s\n' "$RUN_COMMAND" >> .env; fi
-          chmod 600 .env
-          echo "Environment file created successfully."
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
 
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+
+          ngrok version
+
+      # --------------------------------------------------
+      # 5. PYTHON DEPENDENCIES
+      # --------------------------------------------------
       - name: Install Python Dependencies
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -e
+
           python -m pip install --upgrade pip
+
           if [ -f requirements.txt ]; then
-            echo "Installing requirements.txt..."
             pip install -r requirements.txt
-          else
-            echo "No requirements.txt found."
           fi
 
-      - name: Start Hosted Bot
+          # Common API dependencies
+          pip install \
+            fastapi \
+            uvicorn \
+            python-dotenv
+
+      # --------------------------------------------------
+      # 6. CREATE ENV
+      # --------------------------------------------------
+      - name: Generate Environment
+        shell: bash
         env:
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
-          RUN_COMMAND: ${{ secrets.RUN_COMMAND }}
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          set -e
+
+          touch .env
+
+          if [ -n "$NGROK_AUTH_TOKEN" ]; then
+            echo "NGROK_AUTH_TOKEN=$NGROK_AUTH_TOKEN" >> .env
+          fi
+
+          echo "Environment prepared."
+
+      # --------------------------------------------------
+      # 7. CONFIGURE NGROK
+      # --------------------------------------------------
+      - name: Configure Ngrok
+        shell: bash
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          set -e
+
+          if [ -z "$NGROK_AUTH_TOKEN" ]; then
+            echo "ERROR: NGROK_AUTH_TOKEN secret is missing."
+            exit 1
+          fi
+
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+
+          echo "Ngrok configured."
+
+      # --------------------------------------------------
+      # 8. START FASTAPI
+      # --------------------------------------------------
+      - name: Start FastAPI
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -e
 
-          echo "=========================================="
-          echo "        HOSTED BOT STARTING"
-          echo "=========================================="
+          echo "================================="
+          echo "Starting MAGMA API..."
+          echo "================================="
 
-          if [ -n "${RUN_COMMAND:-}" ]; then
-            echo "Running custom command..."
-            bash -c "$RUN_COMMAND"
+          # Change this ONLY if your API entry file is different.
+          if [ -f "app.py" ]; then
+            API_MODULE="app:app"
           elif [ -f "main.py" ]; then
-            echo "Running main.py..."
-            python3 main.py
-          elif [ -f "bot.py" ]; then
-            echo "Running bot.py..."
-            python3 bot.py
+            API_MODULE="main:app"
           else
-            PY_FILE=$(find . -maxdepth 1 -type f -name "*.py" ! -name "setup.py" | sort | head -n 1)
-            if [ -n "$PY_FILE" ]; then
-              echo "Running $PY_FILE..."
-              python3 "$PY_FILE"
-            else
-              echo "ERROR: No Python bot file found."
-              exit 1
-            fi
+            echo "ERROR: app.py or main.py not found."
+            exit 1
           fi
 
-      - name: Bot Finished
+          echo "Using: $API_MODULE"
+
+          nohup python -m uvicorn "$API_MODULE" \
+            --host 0.0.0.0 \
+            --port 8000 \
+            > api.log 2>&1 &
+
+          echo $! > api.pid
+
+          echo "API PID: $(cat api.pid)"
+
+          # Give API time to boot
+          sleep 8
+
+          # Check process
+          if ! kill -0 "$(cat api.pid)" 2>/dev/null; then
+            echo "ERROR: API failed to start."
+            cat api.log || true
+            exit 1
+          fi
+
+          echo "API process is running."
+
+      # --------------------------------------------------
+      # 9. WAIT FOR API
+      # --------------------------------------------------
+      - name: Verify API
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking API..."
+
+          for i in {1..30}; do
+
+            if curl -fsS http://127.0.0.1:8000/ >/dev/null 2>&1; then
+              echo "API is responding."
+              exit 0
+            fi
+
+            echo "Waiting for API... $i/30"
+            sleep 2
+
+          done
+
+          echo "ERROR: API did not respond."
+          cat api.log || true
+          exit 1
+
+      # --------------------------------------------------
+      # 10. START NGROK
+      # --------------------------------------------------
+      - name: Start Ngrok
+        shell: bash
+        run: |
+          set -e
+
+          echo "Starting Ngrok..."
+
+          nohup ngrok http 8000 \
+            --log=stdout \
+            > ngrok.log 2>&1 &
+
+          echo $! > ngrok.pid
+
+          sleep 8
+
+          if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+            echo "ERROR: Ngrok failed to start."
+            cat ngrok.log || true
+            exit 1
+          fi
+
+          echo "Ngrok process is running."
+
+      # --------------------------------------------------
+      # 11. GET PUBLIC URL
+      # --------------------------------------------------
+      - name: Get Public Ngrok URL
+        shell: bash
+        run: |
+          set -e
+
+          echo "Waiting for public URL..."
+
+          for i in {1..30}; do
+
+            URL=$(curl -fsS http://127.0.0.1:4040/api/tunnels \
+              | jq -r '.tunnels[0].public_url // empty' \
+              2>/dev/null || true)
+
+            if [ -n "$URL" ]; then
+              echo "================================="
+              echo "PUBLIC API URL"
+              echo "$URL"
+              echo "================================="
+
+              echo "API_URL=$URL" >> "$GITHUB_ENV"
+
+              exit 0
+            fi
+
+            echo "Waiting for Ngrok... $i/30"
+            sleep 2
+
+          done
+
+          echo "ERROR: Could not get Ngrok URL."
+          cat ngrok.log || true
+          exit 1
+
+      # --------------------------------------------------
+      # 12. KEEP API RUNNING
+      # --------------------------------------------------
+      - name: Keep API Running
+        shell: bash
+        run: |
+          set +e
+
+          echo "=========================================="
+          echo "MAGMA API IS ONLINE"
+          echo "=========================================="
+          echo "Public URL: ${API_URL:-unknown}"
+          echo "=========================================="
+
+          START_TIME=$(date +%s)
+
+          while true; do
+
+            # ------------------------------------------
+            # Check API process
+            # ------------------------------------------
+            if ! kill -0 "$(cat api.pid)" 2>/dev/null; then
+              echo "ERROR: FastAPI process stopped."
+
+              echo "----- API LOG -----"
+              tail -100 api.log || true
+
+              exit 1
+            fi
+
+            # ------------------------------------------
+            # Check Ngrok process
+            # ------------------------------------------
+            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+              echo "ERROR: Ngrok process stopped."
+
+              echo "----- NGROK LOG -----"
+              tail -100 ngrok.log || true
+
+              exit 1
+            fi
+
+            # ------------------------------------------
+            # Check HTTP response
+            # ------------------------------------------
+            HTTP_CODE=$(curl -s \
+              --max-time 10 \
+              -o /dev/null \
+              -w "%{http_code}" \
+              http://127.0.0.1:8000/ \
+              || echo "000")
+
+            NOW=$(date +%s)
+            UPTIME=$((NOW - START_TIME))
+
+            HOURS=$((UPTIME / 3600))
+            MINUTES=$(((UPTIME % 3600) / 60))
+            SECONDS=$((UPTIME % 60))
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] API=$HTTP_CODE | Ngrok=OK | Uptime=${HOURS}h ${MINUTES}m ${SECONDS}s"
+
+            # ------------------------------------------
+            # Restart local API if temporary HTTP issue
+            # ------------------------------------------
+            if [ "$HTTP_CODE" = "000" ]; then
+              echo "WARNING: API health check failed."
+              echo "Process is still alive, so waiting..."
+            fi
+
+            sleep 60
+
+          done
+
+      # --------------------------------------------------
+      # 13. CLEANUP
+      # --------------------------------------------------
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
-          echo "=========================================="
-          echo "       HOSTED BOT RUN FINISHED"
-          echo "=========================================="
-          echo "The Auto Restart workflow will handle the next run."
+          echo "Stopping background services..."
+
+          if [ -f ngrok.pid ]; then
+            kill "$(cat ngrok.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f api.pid ]; then
+            kill "$(cat api.pid)" 2>/dev/null || true
+          fi
+
+          echo "Cleanup completed."
