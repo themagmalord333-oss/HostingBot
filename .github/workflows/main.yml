@@ -36,8 +36,8 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Pyrogram aur tgcrypto Local Manager ke liye zaroori hain
-          pip install pyrogram tgcrypto
+          # Pyrogram, tgcrypto aur AI scanner package direct install kar lo
+          pip install pyrogram tgcrypto google-generativeai
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
@@ -47,6 +47,7 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # <--- Ye raha AI Key
         run: |
           echo "=========================================="
           echo "       STARTING LOCAL HOST MANAGER"
