@@ -1,4 +1,4 @@
-Name: Ultimate Deployer & Runner
+name: Ultimate Deployer & Runner
 
 on:
   repository_dispatch:
@@ -70,12 +70,10 @@ jobs:
           set -Eeuo pipefail
           rm -f .env
           
-          # Basic Validation
           if [ -z "${API_ID:-}" ]; then echo "ERROR: API_ID secret is missing."; exit 1; fi
           if [ -z "${API_HASH:-}" ]; then echo "ERROR: API_HASH secret is missing."; exit 1; fi
           if [ -z "${BOT_TOKEN:-}" ]; then echo "ERROR: BOT_TOKEN secret is missing."; exit 1; fi
           
-          # Write to .env just in case the python script strictly requires the file on disk
           printf 'API_ID=%s\n' "$API_ID" >> .env
           printf 'API_HASH=%s\n' "$API_HASH" >> .env
           printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" >> .env
@@ -97,7 +95,6 @@ jobs:
           fi
 
       - name: Start Hosted Bot
-        # 🚀 FIX YAHAN HAI: Secrets direct is step ko pass kar diye hain!
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
