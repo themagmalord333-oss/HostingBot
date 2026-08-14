@@ -6,10 +6,16 @@ import sys
 import time
 import json
 import subprocess
+import google.generativeai as genai
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
 import config
+
+# ================= SETUP GEMINI AI =================
+genai.configure(api_key=config.GEMINI_API_KEY)
+# Flash model tez aur sasta (free) hota hai
+ai_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # ================= CONFIG & GLOBALS =================
 HOST_DIR = "hosted_bots"
@@ -18,7 +24,7 @@ os.makedirs(HOST_DIR, exist_ok=True)
 app = Client("LocalHostManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
-RUNNING_PROCESSES = {}  # Background mein chalne wale bots ka data
+RUNNING_PROCESSES = {} 
 
 # ================= HELPER FUNCTIONS =================
 def cleanup_state(user_id):
@@ -37,28 +43,50 @@ def safe_extract_zip(zip_path, extract_to):
             if not member_path.startswith(abs_extract_to):
                 raise ValueError(f"Security Alert: Path Traversal Detected in {member}")
         zip_ref.extractall(extract_to)
-    
-    # 🔥 YAHAN FIX KIYA HAI: Agar ZIP ke andar ek main folder hai, toh usko bahar nikal lo
-    extracted_items = os.listdir(extract_to)
-    if len(extracted_items) == 1:
-        single_folder = os.path.join(extract_to, extracted_items[0])
-        if os.path.isdir(single_folder):
-            for item in os.listdir(single_folder):
-                shutil.move(os.path.join(single_folder, item), extract_to)
-            os.rmdir(single_folder)
 
-def get_local_modules(bot_dir):
-    local_modules = set()
-    for root, dirs, files in os.walk(bot_dir):
-        for d in dirs: local_modules.add(d)
+def get_directory_structure(rootdir):
+    """Folder ka poora tree banata hai AI ko dikhane ke liye"""
+    dir_tree = ""
+    for root, dirs, files in os.walk(rootdir):
+        level = root.replace(rootdir, '').count(os.sep)
+        indent = ' ' * 4 * (level)
+        dir_tree += f"{indent}{os.path.basename(root)}/\n"
+        subindent = ' ' * 4 * (level + 1)
         for f in files:
-            if f.endswith(".py"): local_modules.add(f[:-3])
-    return local_modules
+            dir_tree += f"{subindent}{f}\n"
+    return dir_tree
 
+def ask_gemini_for_entry(bot_dir):
+    """Gemini AI se scan karwata hai aur JSON output leta hai"""
+    tree = get_directory_structure(bot_dir)
+    prompt = f"""
+    I have extracted a telegram bot's ZIP file. Here is the exact directory tree:
+    {tree}
+    
+    Analyze this structure intelligently. Find the main entry point file used to start the bot.
+    Often it's named main.py, bot.py, __main__.py, app.py, or index.js. It might be inside a subfolder.
+    
+    Respond STRICTLY with valid JSON. No markdown formatting, no explanations. 
+    Required keys:
+    "entry_file": "The relative path to the main file from the root directory"
+    "run_command": ["python3", "path/to/file.py"] (Provide the exact list of command arguments to run it)
+    """
+    try:
+        response = ai_model.generate_content(prompt)
+        res_text = response.text.strip()
+        # Clean JSON from markdown if AI adds it
+        if res_text.startswith("```json"): res_text = res_text[7:-3]
+        elif res_text.startswith("```"): res_text = res_text[3:-3]
+        
+        return json.loads(res_text.strip())
+    except Exception as e:
+        print(f"Gemini AI Error: {e}")
+        return None
+
+# Pip Packages Scanner
 def parse_missing_imports(bot_dir):
     std_libs = set(sys.builtin_module_names) | set(getattr(sys, "stdlib_module_names", []))
     pypi_mapping = {"PIL": "Pillow", "telegram": "python-telegram-bot", "cv2": "opencv-python", "dotenv": "python-dotenv", "bs4": "beautifulsoup4"}
-    local_modules = get_local_modules(bot_dir)
     imports = set()
     for root, _, files in os.walk(bot_dir):
         for file in files:
@@ -71,36 +99,16 @@ def parse_missing_imports(bot_dir):
                             for alias in node.names: imports.add(alias.name.split(".")[0])
                         elif isinstance(node, ast.ImportFrom) and node.module:
                             imports.add(node.module.split(".")[0])
-                except Exception: pass
-    required = [pypi_mapping.get(i, i) for i in imports if i not in std_libs and i not in local_modules and i]
+                except: pass
+    required = [pypi_mapping.get(i, i) for i in imports if i not in std_libs and i]
     return required
-
-def detect_entry_file(bot_dir):
-    pkg_json_path = os.path.join(bot_dir, "package.json")
-    if os.path.exists(pkg_json_path):
-        try:
-            with open(pkg_json_path, "r") as f:
-                data = json.load(f)
-                if "main" in data and os.path.exists(os.path.join(bot_dir, data["main"])):
-                    return data["main"]
-        except: pass
-    std_files = ["bot.py", "main.py", "app.py", "index.js", "server.js"]
-    for root, _, files in os.walk(bot_dir):
-        for file in files:
-            if file.lower() in std_files:
-                return os.path.relpath(os.path.join(root, file), bot_dir)
-    return None
 
 # ================= KEYBOARDS =================
 def get_main_keyboard(user_id):
     is_running = user_id in RUNNING_PROCESSES
-    kb = [
-        [InlineKeyboardButton("📂 Upload New Bot (ZIP/PY)", callback_data="btn_upload_info")]
-    ]
-    if is_running:
-        kb.append([InlineKeyboardButton("🔴 STOP RUNNING BOT", callback_data="btn_stop")])
-    else:
-        kb.append([InlineKeyboardButton("🚀 DEPLOY & RUN LOCAL", callback_data="btn_deploy")])
+    kb = [[InlineKeyboardButton("📂 Upload New Bot (ZIP/PY)", callback_data="btn_upload_info")]]
+    if is_running: kb.append([InlineKeyboardButton("🔴 STOP RUNNING BOT", callback_data="btn_stop")])
+    else: kb.append([InlineKeyboardButton("🚀 DEPLOY & RUN LOCAL", callback_data="btn_deploy")])
     return InlineKeyboardMarkup(kb)
 
 def get_cancel_keyboard():
@@ -112,9 +120,9 @@ async def start_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text(
-        "<b>👑 LOCAL HOSTING MANAGER</b>\n\n"
-        "Send any `.py`, `.js`, or `.zip` file via 📎 (Paperclip) icon.\n"
-        "Ye bot files ko Github par nahi bhejega, balki yahi server par run karega! 🚀", 
+        "<b>👑 AI-POWERED HOSTING MANAGER</b>\n\n"
+        "Send any `.zip`, `.py`, or `.js` file via 📎 (Paperclip) icon.\n"
+        "Gemini AI structure scan karke khud batayega code kaise chalana hai! 🧠🚀", 
         reply_markup=get_main_keyboard(user_id)
     )
 
@@ -129,31 +137,25 @@ async def callback_handler(client, query: CallbackQuery):
         await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
 
     elif data == "btn_upload_info":
-        await query.answer("📎 File upload karne ke liye niche 'Paperclip' (Attachment) icon par click karein!", show_alert=True)
+        await query.answer("📎 File upload karne ke liye niche 'Paperclip' icon par click karein!", show_alert=True)
 
     elif data == "btn_deploy":
         state = USER_STATE.get(user_id)
-        if not state or "entry" not in state:
-            return await query.answer("No files found! Please upload a ZIP or PY file first.", show_alert=True)
+        if not state or "run_cmd" not in state:
+            return await query.answer("No files found! Please upload a ZIP/PY file first.", show_alert=True)
         
         bot_dir = state["dir"]
-        entry_file = state["entry"]
+        run_cmd = state["run_cmd"] # AI ne jo command di hai wo chalegi
         
-        # 🔥 YAHAN BHI FIX KIYA HAI: Direct sahi folder location set hoga
-        full_entry_path = os.path.join(bot_dir, entry_file)
-        actual_cwd = os.path.dirname(full_entry_path)
-        actual_entry_name = os.path.basename(full_entry_path)
-
         if user_id in RUNNING_PROCESSES:
             try: RUNNING_PROCESSES[user_id].terminate()
             except: pass
 
-        await query.message.edit_text("🚀 Spawning process in background...")
+        await query.message.edit_text(f"🚀 Spawning process using AI command: `{' '.join(run_cmd)}`")
         
-        cmd = [sys.executable if actual_entry_name.endswith(".py") else "node", actual_entry_name]
         try:
-            # Sahi working directory (actual_cwd) use ho rahi hai ab
-            process = subprocess.Popen(cmd, cwd=actual_cwd)
+            # Popen se background mein AI ki di hui command run karenge
+            process = subprocess.Popen(run_cmd, cwd=bot_dir)
             RUNNING_PROCESSES[user_id] = process
             await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
         except Exception as e:
@@ -168,7 +170,6 @@ async def callback_handler(client, query: CallbackQuery):
             await query.message.edit_text("🛑 **Bot process Stopped!**", reply_markup=get_main_keyboard(user_id))
         else:
             await query.answer("Bot is not running.", show_alert=True)
-            await query.message.edit_text("🛑 Bot is already stopped.", reply_markup=get_main_keyboard(user_id))
 
 # ================= UPLOAD MANAGER =================
 @app.on_message(filters.document)
@@ -188,6 +189,7 @@ async def handle_document(client, message):
     file_path = os.path.join(bot_dir, doc.file_name)
     await message.download(file_path)
 
+    # 1. Extraction
     if file_ext == "zip":
         await status.edit_text("📦 Extracting ZIP safely...")
         try:
@@ -197,6 +199,7 @@ async def handle_document(client, message):
             shutil.rmtree(bot_dir)
             return await status.edit_text(f"❌ Extraction Error: {e}")
 
+    # 2. Package Scan
     req_path = os.path.join(bot_dir, "requirements.txt")
     if not os.path.exists(req_path):
         await status.edit_text("🔍 Scanning code for missing pip packages...")
@@ -208,23 +211,47 @@ async def handle_document(client, message):
         await status.edit_text("⚙️ Installing packages via pip...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path])
 
-    entry_file = detect_entry_file(bot_dir)
+    # 3. GEMINI AI SCAN (The Magic)
     USER_STATE[user_id] = {"dir": bot_dir, "timestamp": time.time()}
-
-    if not entry_file:
-        if file_ext in ["py", "js"]: 
-            entry_file = doc.file_name
+    
+    if file_ext == "zip":
+        await status.edit_text("🧠 **Gemini AI** is analyzing your folder structure...")
+        ai_result = ask_gemini_for_entry(bot_dir)
+        
+        if ai_result and "run_command" in ai_result:
+            entry_file = ai_result.get("entry_file", "Unknown")
+            run_cmd = ai_result["run_command"]
+            
+            # Subprocess me run karne ke liye list ko theek karte hain
+            if "python3" in run_cmd: run_cmd[run_cmd.index("python3")] = sys.executable
+            elif "python" in run_cmd: run_cmd[run_cmd.index("python")] = sys.executable
+            
+            USER_STATE[user_id]["entry"] = entry_file
+            USER_STATE[user_id]["run_cmd"] = run_cmd
+            
+            cmd_str = " ".join(run_cmd)
+            await status.edit_text(
+                f"🧠 **Gemini AI Analysis Complete!**\n"
+                f"📂 Entry File: `{entry_file}`\n"
+                f"⚙️ Run Command: `{cmd_str}`\n\n"
+                f"Click **DEPLOY & RUN LOCAL** to start it.",
+                reply_markup=get_main_keyboard(user_id)
+            )
         else:
             USER_STATE[user_id]["action"] = "wait_entry"
-            return await status.edit_text("🚨 **Main file not found!**\nSend the exact file name (e.g. `main.py`):", reply_markup=get_cancel_keyboard())
+            await status.edit_text("🚨 AI could not detect main file!\nSend exact path manually (e.g. `src/main.py`):", reply_markup=get_cancel_keyboard())
+    else:
+        # For single files, AI is not needed
+        entry_file = doc.file_name
+        run_cmd = [sys.executable if file_ext == "py" else "node", entry_file]
+        USER_STATE[user_id]["entry"] = entry_file
+        USER_STATE[user_id]["run_cmd"] = run_cmd
+        await status.edit_text(
+            f"✅ **File Ready!**\n📂 Main Entry: `{entry_file}`\n\nClick **DEPLOY** to start.",
+            reply_markup=get_main_keyboard(user_id)
+        )
 
-    USER_STATE[user_id]["entry"] = entry_file
-    await status.edit_text(
-        f"✅ **Files Ready!**\n📂 Main Entry: `{entry_file}`\n\nClick **DEPLOY & RUN LOCAL** to start your bot.",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-# ================= TEXT STATE HANDLER =================
+# ================= MANUAL TEXT OVERRIDE =================
 @app.on_message(filters.text & ~filters.command(["start", "cancel"]))
 async def text_handler(client, message):
     user_id = message.from_user.id
@@ -232,15 +259,12 @@ async def text_handler(client, message):
     text = message.text.strip()
     if not state or "action" not in state: return
 
-    action = state["action"]
-    if action == "wait_entry":
-        if os.path.exists(os.path.join(state["dir"], text)):
-            USER_STATE[user_id]["entry"] = text
-            USER_STATE[user_id].pop("action", None)
-            await message.reply_text(f"✅ **Main File Set:** `{text}`", reply_markup=get_main_keyboard(user_id))
-        else:
-            await message.reply_text("❌ File not found in directory. Check spelling and send again:")
+    if state["action"] == "wait_entry":
+        USER_STATE[user_id]["entry"] = text
+        USER_STATE[user_id]["run_cmd"] = [sys.executable if text.endswith(".py") else "node", text]
+        USER_STATE[user_id].pop("action", None)
+        await message.reply_text(f"✅ **Main File Set:** `{text}`", reply_markup=get_main_keyboard(user_id))
 
 if __name__ == "__main__":
-    print("🚀 Local Host Manager Bot is Starting...")
+    print("🚀 AI-Powered Host Manager is Starting...")
     app.run()
