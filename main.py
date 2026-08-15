@@ -26,7 +26,7 @@ os.makedirs(HOST_DIR, exist_ok=True)
 app = Client("LocalHostManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
-RUNNING_PROCESSES = {} 
+RUNNING_PROCESSES = {}  # Store: {user_id: {"process": Popen_obj, "log_file": file_obj}}
 
 # ================= HELPER FUNCTIONS =================
 def cleanup_state(user_id):
@@ -163,37 +163,32 @@ async def callback_handler(client, query: CallbackQuery):
         
         bot_dir = state["dir"]
         entry_file = state["entry"]
-        actual_file_path = os.path.join(bot_dir, entry_file)
         
-        # 🔥 SMART FALLBACK SEARCH: Agar strictly path par nahi mila, toh deep search karo
-        if not os.path.exists(actual_file_path):
-            found_paths = []
-            target_name = os.path.basename(entry_file) # extract just "sting.py"
+        # 🔥 SMART DEEP SEARCH: ZIP ke andar kahin bhi file ho, dhund lo
+        found_file = None
+        target_name = os.path.basename(entry_file)
+        
+        for root, _, files in os.walk(bot_dir):
+            if target_name in files:
+                found_file = os.path.join(root, target_name)
+                break
+                
+        if not found_file:
+            try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified: return await query.answer("File missing!", show_alert=True)
             
-            for root, _, files in os.walk(bot_dir):
-                if target_name in files:
-                    found_paths.append(os.path.join(root, target_name))
-            
-            if len(found_paths) == 1:
-                actual_file_path = found_paths[0]
-                entry_file = os.path.relpath(actual_file_path, bot_dir) # Update path for UI
-            elif len(found_paths) > 1:
-                try: return await query.message.edit_text(f"❌ Multiple `{target_name}` found! Please type EXACT relative path (e.g. folder/{target_name})", reply_markup=get_main_keyboard(user_id))
-                except MessageNotModified: return await query.answer("Multiple files found!", show_alert=True)
-            else:
-                try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
-                except MessageNotModified: return await query.answer("File missing!", show_alert=True)
-
-                # 🔥 SMART CWD: Jaha file mili, wahi root ban jayega (for .env & requirements)
-        working_directory = os.path.abspath(os.path.dirname(actual_file_path))
+        # 🔥 SMART CWD: Jaha file mili, wahi project ka root banega (taaki .env aur requirements match ho sakein)
+        working_directory = os.path.dirname(found_file)
+        target_file_name = os.path.basename(found_file)
+        
         stop_running_bot(user_id)
-        
-        # Exact file name pass karenge taaki path append/duplicate na ho
-        target_file_name = os.path.basename(actual_file_path)
+
         cmd = [sys.executable, "-u", target_file_name] if target_file_name.endswith(".py") else ["node", target_file_name]
-    
-        try: await query.message.edit_text(f"🚀 Spawning process...\n📂 Folder: `{os.path.basename(working_directory)}`\n📄 File: `{os.path.basename(actual_file_path)}`")
-        except MessageNotModified: pass
+        
+        try: 
+            await query.message.edit_text(f"🚀 Spawning process...\n📂 Folder: `{os.path.basename(working_directory)}`\n📄 File: `{target_file_name}`")
+        except MessageNotModified: 
+            pass
         
         try:
             log_path = os.path.join(working_directory, "host_manager.log")
@@ -209,6 +204,7 @@ async def callback_handler(client, query: CallbackQuery):
             
             RUNNING_PROCESSES[user_id] = {"process": process, "log_file": log_file}
             
+            # Crash Detection check after 2 seconds
             await asyncio.sleep(2)
             
             if process.poll() is not None:
@@ -306,7 +302,7 @@ async def handle_document(client, message):
             )
         else:
             USER_STATE[user_id]["action"] = "wait_entry"
-            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT file name (e.g. `sting.py`):", reply_markup=get_cancel_keyboard())
+            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT file name manually (e.g. `main.py` or `sting.py`):", reply_markup=get_cancel_keyboard())
     else:
         entry_file = doc.file_name
         USER_STATE[user_id]["entry"] = entry_file
