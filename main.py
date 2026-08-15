@@ -23,10 +23,29 @@ ai_model = genai.GenerativeModel('gemini-1.5-flash')
 HOST_DIR = "hosted_bots"
 os.makedirs(HOST_DIR, exist_ok=True)
 
-app = Client("LocalHostManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+app = Client("SimranHostingRunner", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
-RUNNING_PROCESSES = {}  # Store: {user_id: {"process": Popen_obj, "log_file": file_obj}}
+RUNNING_PROCESSES = {}  # {user_id: {"process": Popen, "log_file": file_obj}}
+
+# ================= UPDATED PACKAGE MAPPING =================
+# Simran Hosting Panel ke saare dependencies yahan add kiye hain
+PIP_ALIAS = {
+    "PIL": "Pillow",
+    "telegram": "python-telegram-bot",
+    "cv2": "opencv-python",
+    "dotenv": "python-dotenv",
+    "bs4": "beautifulsoup4",
+    "telebot": "pyTelegramBotAPI",
+    "cryptography": "cryptography",
+    "flask": "flask",
+    "apscheduler": "APScheduler",
+    "github": "PyGithub",
+    "psutil": "psutil",
+    "requests": "requests",
+    "yaml": "PyYAML",
+    "Crypto": "pycryptodome"
+}
 
 # ================= HELPER FUNCTIONS =================
 def cleanup_state(user_id):
@@ -42,14 +61,14 @@ def stop_running_bot(user_id):
         p_data = RUNNING_PROCESSES[user_id]
         process = p_data.get("process")
         log_file = p_data.get("log_file")
-        
+
         if process:
             try: process.terminate()
             except: pass
         if log_file and not log_file.closed:
             try: log_file.close()
             except: pass
-            
+
         del RUNNING_PROCESSES[user_id]
         return True
     return False
@@ -79,11 +98,11 @@ def ask_gemini_for_entry(bot_dir):
     prompt = f"""
     I have extracted a telegram bot's ZIP file. Here is the exact directory tree:
     {tree}
-    
+
     Analyze this structure intelligently. Find the main entry point file used to start the bot.
-    The file could be named anything (e.g., main.py, bot.py, app.py, sting.py, etc.).
+    The file could be named anything (e.g., main.py, bot.py, app.py, premiumhosting.py, sting.py, etc.).
     Look for the most logical starting file. Provide its RELATIVE PATH from the root directory.
-    
+
     Respond ONLY with valid JSON and nothing else. Use this exact format:
     {{
         "entry_file": "relative/path/to/bot.py"
@@ -102,7 +121,6 @@ def ask_gemini_for_entry(bot_dir):
 
 def parse_missing_imports(bot_dir):
     std_libs = set(sys.builtin_module_names) | set(getattr(sys, "stdlib_module_names", []))
-    pypi_mapping = {"PIL": "Pillow", "telegram": "python-telegram-bot", "cv2": "opencv-python", "dotenv": "python-dotenv", "bs4": "beautifulsoup4"}
     imports = set()
     for root, _, files in os.walk(bot_dir):
         for file in files:
@@ -112,19 +130,27 @@ def parse_missing_imports(bot_dir):
                         tree = ast.parse(f.read())
                     for node in ast.walk(tree):
                         if isinstance(node, ast.Import):
-                            for alias in node.names: imports.add(alias.name.split(".")[0])
+                            for alias in node.names:
+                                imports.add(alias.name.split(".")[0])
                         elif isinstance(node, ast.ImportFrom) and node.module:
                             imports.add(node.module.split(".")[0])
                 except: pass
-    required = [pypi_mapping.get(i, i) for i in imports if i not in std_libs and i]
+    required = []
+    for i in imports:
+        if i not in std_libs and i:
+            required.append(PIP_ALIAS.get(i, i))
     return required
 
 # ================= KEYBOARDS =================
 def get_main_keyboard(user_id):
     is_running = user_id in RUNNING_PROCESSES
-    kb = [[InlineKeyboardButton("📂 Upload New Bot (ZIP/PY)", callback_data="btn_upload_info")]]
-    if is_running: kb.append([InlineKeyboardButton("🔴 STOP RUNNING BOT", callback_data="btn_stop")])
-    else: kb.append([InlineKeyboardButton("🚀 DEPLOY & RUN LOCAL", callback_data="btn_deploy")])
+    kb = []
+    kb.append([InlineKeyboardButton("📂 Upload Bot (ZIP/PY)", callback_data="btn_upload_info")])
+    if is_running:
+        kb.append([InlineKeyboardButton("🔴 STOP RUNNING BOT", callback_data="btn_stop")])
+    else:
+        kb.append([InlineKeyboardButton("🚀 DEPLOY & RUN", callback_data="btn_deploy")])
+    kb.append([InlineKeyboardButton("🔑 Set Environment Vars", callback_data="btn_set_env")])
     return InlineKeyboardMarkup(kb)
 
 def get_cancel_keyboard():
@@ -136,9 +162,10 @@ async def start_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text(
-        "<b>👑 ANYSNAP HOSTING MANAGER</b>\n\n"
-        "Send any `.zip`, `.py`, or `.js` file via 📎 (Paperclip) icon.\n"
-        "Ye bot khud file dhoondhkar chalayega! 🧠🚀", 
+        "<b>🧠 Simran Hosting Local Runner</b>\n\n"
+        "Send `.zip`, `.py`, or `.js` file to host any bot locally.\n"
+        "AI automatically detects entry file & installs dependencies.\n"
+        "Set environment variables (like BOT_TOKEN) via button below.",
         reply_markup=get_main_keyboard(user_id)
     )
 
@@ -150,49 +177,62 @@ async def callback_handler(client, query: CallbackQuery):
 
     if data == "btn_cancel":
         cleanup_state(user_id)
-        try: await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
-        except MessageNotModified: await query.answer("Already cancelled.", show_alert=True)
+        try:
+            await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
+        except MessageNotModified:
+            await query.answer("Already cancelled.", show_alert=True)
 
     elif data == "btn_upload_info":
-        await query.answer("📎 File upload karne ke liye niche 'Paperclip' icon par click karein!", show_alert=True)
+        await query.answer("📎 Send file via Paperclip icon!", show_alert=True)
+
+    elif data == "btn_set_env":
+        USER_STATE[user_id]["action"] = "wait_env"
+        await query.message.edit_text(
+            "🔑 **Send Environment Variables**\n\n"
+            "Format: `KEY=VALUE` (one per line)\n"
+            "Example:\n"
+            "`BOT_TOKEN=123456:ABC...`\n"
+            "`OWNER_ID=8253072984`\n"
+            "`GITHUB_TOKEN=...`\n\n"
+            "Send /cancel to abort.",
+            reply_markup=get_cancel_keyboard()
+        )
 
     elif data == "btn_deploy":
         state = USER_STATE.get(user_id)
         if not state or "entry" not in state:
-            return await query.answer("No files found! Please upload a ZIP/PY file first.", show_alert=True)
-        
+            return await query.answer("No files found! Upload a bot first.", show_alert=True)
+
         bot_dir = state["dir"]
         entry_file = state["entry"]
-        
-        # 1. Entry file ka exact path nikalna
+
+        # Exact path resolve karo
         exact_entry_path = os.path.normpath(os.path.join(bot_dir, entry_file))
-        
-        # Agar Gemini ka path thoda galat ho, toh fallback search karega
         if not os.path.exists(exact_entry_path):
             target_name = os.path.basename(entry_file)
             for root, _, files in os.walk(bot_dir):
                 if target_name in files:
                     exact_entry_path = os.path.join(root, target_name)
                     break
-                
+
         if not exact_entry_path or not os.path.exists(exact_entry_path):
-            try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
-            except MessageNotModified: return await query.answer("File missing!", show_alert=True)
-            
-        # 🔥 FIX: Dono paths ko Absolute Path me convert karna zaroori hai taaki path double na ho
+            try:
+                await query.message.edit_text(f"❌ Entry file `{entry_file}` not found!", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified:
+                await query.answer("File missing!", show_alert=True)
+            return
+
         exact_entry_path = os.path.abspath(exact_entry_path)
 
-        # 2. SMART PROJECT ROOT: Jaha .env ya requirements.txt ho, wahi asli root hai
+        # Project root find karo (jaha .env ya requirements.txt ho)
         project_root = os.path.dirname(exact_entry_path)
         for root, _, files in os.walk(bot_dir):
             if ".env" in files or "requirements.txt" in files:
                 project_root = root
                 break
-                
-        # 🔥 FIX: Root ko bhi absolute bana diya
         project_root = os.path.abspath(project_root)
 
-        # 3. .ENV FILE INJECTOR: .env ko read karke environment variables me daalna
+        # 🔥 .env file se environment variables load karo
         bot_env_vars = os.environ.copy()
         env_file_path = os.path.join(project_root, ".env")
         if os.path.exists(env_file_path):
@@ -200,88 +240,100 @@ async def callback_handler(client, query: CallbackQuery):
                 with open(env_file_path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        # Ignore comments and empty lines
                         if line and not line.startswith("#") and "=" in line:
                             key, val = line.split("=", 1)
                             bot_env_vars[key.strip()] = val.strip().strip("'\"")
             except Exception as e:
-                print(f"Failed to load .env file: {e}")
+                print(f".env load error: {e}")
 
+        # Agar user ne manual env vars set kiye hain toh unhe bhi inject karo
+        user_env = state.get("env_vars", {})
+        for k, v in user_env.items():
+            bot_env_vars[k] = v
+
+        # 🔥 Stop existing process agar chal raha hai
         stop_running_bot(user_id)
 
-        # Ab hum exact file chalayenge absolute path ke sath
         cmd = [sys.executable, "-u", exact_entry_path] if exact_entry_path.endswith(".py") else ["node", exact_entry_path]
-        
-        try: 
-            await query.message.edit_text(f"🚀 Spawning process...\n📂 Root: `{os.path.basename(project_root)}`\n📄 File: `{os.path.basename(exact_entry_path)}`")
-        except MessageNotModified: 
+
+        try:
+            await query.message.edit_text(f"🚀 Starting: `{os.path.basename(exact_entry_path)}`")
+        except MessageNotModified:
             pass
-        
+
         try:
             log_path = os.path.join(project_root, "host_manager.log")
             log_file = open(log_path, "a", buffering=1)
-            
+
             process = subprocess.Popen(
-                cmd, 
+                cmd,
                 cwd=project_root,
                 env=bot_env_vars,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL
             )
-            
+
             RUNNING_PROCESSES[user_id] = {"process": process, "log_file": log_file}
-            
-            # Crash Detection check after 3 seconds
+
             await asyncio.sleep(3)
-            
+
             if process.poll() is not None:
                 stop_running_bot(user_id)
                 try:
                     with open(log_path, "r") as f:
-                        log_data = f.read()[-3500:] 
-                        if not log_data.strip(): log_data = "No output captured."
+                        log_data = f.read()[-3500:]
+                        if not log_data.strip():
+                            log_data = "No output captured."
                 except Exception:
                     log_data = "Could not read log file."
-                    
-                error_msg = f"❌ **Bot Crashed Immediately!**\n\n**Log Output:**\n`{log_data}`"
-                try: await query.message.edit_text(error_msg, reply_markup=get_main_keyboard(user_id))
-                except MessageNotModified: pass
+
+                error_msg = f"❌ **Bot Crashed!**\n\n**Log:**\n`{log_data}`"
+                try:
+                    await query.message.edit_text(error_msg, reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified:
+                    pass
             else:
-                try: await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
-                except MessageNotModified: pass
+                try:
+                    await query.message.edit_text("✅ **Bot is RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified:
+                    pass
 
         except Exception as e:
-            try: await query.message.edit_text(f"❌ Failed to start process: {e}", reply_markup=get_main_keyboard(user_id))
-            except MessageNotModified: await query.answer(f"Failed: {e}", show_alert=True)
+            try:
+                await query.message.edit_text(f"❌ Failed to start: {e}", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified:
+                await query.answer(f"Error: {e}", show_alert=True)
 
     elif data == "btn_stop":
         if stop_running_bot(user_id):
-            try: await query.message.edit_text("🛑 **Bot process Stopped & Killed safely!**", reply_markup=get_main_keyboard(user_id))
-            except MessageNotModified: await query.answer("Bot is already stopped.", show_alert=True)
+            try:
+                await query.message.edit_text("🛑 Bot stopped successfully.", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified:
+                await query.answer("Stopped.", show_alert=True)
         else:
-            await query.answer("Bot is not running.", show_alert=True)
+            await query.answer("Bot not running.", show_alert=True)
 
-# ================= UPLOAD MANAGER =================
+# ================= UPLOAD HANDLER =================
 @app.on_message(filters.document)
 async def handle_document(client, message):
     user_id = message.from_user.id
     doc = message.document
     file_ext = doc.file_name.split(".")[-1].lower()
-    
-    if file_ext not in ["py", "js", "zip"]: 
+
+    if file_ext not in ["py", "js", "zip"]:
         return await message.reply_text("❌ Only `.py`, `.js`, or `.zip` allowed!")
 
     status = await message.reply_text("📥 Downloading file...")
     cleanup_state(user_id)
-    
+
     bot_dir = os.path.join(HOST_DIR, f"{user_id}_{int(time.time())}")
     os.makedirs(bot_dir, exist_ok=True)
     file_path = os.path.join(bot_dir, doc.file_name)
     await message.download(file_path)
 
     if file_ext == "zip":
-        await status.edit_text("📦 Extracting ZIP safely...")
+        await status.edit_text("📦 Extracting ZIP securely...")
         try:
             safe_extract_zip(file_path, bot_dir)
             os.remove(file_path)
@@ -289,70 +341,100 @@ async def handle_document(client, message):
             shutil.rmtree(bot_dir)
             return await status.edit_text(f"❌ Extraction Error: {e}")
 
+    # 🔥 Requirements generation with updated mapping
     req_path = None
     for root, _, files in os.walk(bot_dir):
         if "requirements.txt" in files:
             req_path = os.path.join(root, "requirements.txt")
             break
-            
+
     if not req_path:
         req_path = os.path.join(bot_dir, "requirements.txt")
-        await status.edit_text("🔍 Scanning code for missing pip packages...")
+        await status.edit_text("🔍 Scanning imports for missing packages...")
         pkgs = parse_missing_imports(bot_dir)
         if pkgs:
-            with open(req_path, "w") as f: f.write("\n".join(pkgs))
+            with open(req_path, "w") as f:
+                f.write("\n".join(pkgs))
+            await status.edit_text(f"📦 Found {len(pkgs)} packages to install.")
 
+    # 🔥 Install dependencies
     if req_path and os.path.exists(req_path):
-        await status.edit_text("⚙️ Installing packages via pip...")
-        result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, text=True)
-        
+        await status.edit_text("⚙️ Installing dependencies (may take a while)...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", req_path],
+            capture_output=True, text=True, timeout=300
+        )
         if result.returncode != 0:
             shutil.rmtree(bot_dir)
             return await status.edit_text(
-                "❌ **Package installation failed!**\n\n"
-                f"**Error Log:**\n`{result.stderr[-3500:]}`\n\nPlease check your ZIP's requirements."
+                f"❌ **Pip install failed!**\n\n`{result.stderr[-2000:]}`"
             )
 
     USER_STATE[user_id] = {"dir": bot_dir, "timestamp": time.time()}
-    
+
     if file_ext == "zip":
-        await status.edit_text("🧠 **Gemini AI** is analyzing your project structure...")
+        await status.edit_text("🧠 AI is analyzing project structure...")
         ai_result = ask_gemini_for_entry(bot_dir)
-        
         if ai_result and "entry_file" in ai_result:
-            entry_file = ai_result["entry_file"] 
+            entry_file = ai_result["entry_file"]
             USER_STATE[user_id]["entry"] = entry_file
             await status.edit_text(
-                f"🧠 **AI Analysis Complete!**\n"
-                f"📂 Entry File: `{os.path.basename(entry_file)}`\n\n"
-                f"Click **DEPLOY & RUN LOCAL** to start it.",
+                f"🧠 **AI found entry:** `{os.path.basename(entry_file)}`\n"
+                f"Click **DEPLOY** to run.",
                 reply_markup=get_main_keyboard(user_id)
             )
         else:
             USER_STATE[user_id]["action"] = "wait_entry"
-            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT file name manually (e.g. `main.py` or `sting.py`):", reply_markup=get_cancel_keyboard())
+            await status.edit_text(
+                "🚨 AI couldn't detect entry file.\n"
+                "Send the exact filename (e.g., `premiumhosting.py` or `main.py`):",
+                reply_markup=get_cancel_keyboard()
+            )
     else:
         entry_file = doc.file_name
         USER_STATE[user_id]["entry"] = entry_file
         await status.edit_text(
-            f"✅ **File Ready!**\n📂 Main Entry: `{entry_file}`\n\nClick **DEPLOY** to start.",
+            f"✅ File ready: `{entry_file}`\nClick **DEPLOY** to run.",
             reply_markup=get_main_keyboard(user_id)
         )
 
-# ================= MANUAL TEXT OVERRIDE =================
+# ================= TEXT HANDLERS =================
 @app.on_message(filters.text & ~filters.command(["start", "cancel"]))
 async def text_handler(client, message):
     user_id = message.from_user.id
     state = USER_STATE.get(user_id)
     text = message.text.strip()
-    
-    if not state or "action" not in state: return
 
-    if state["action"] == "wait_entry":
+    if not state or "action" not in state:
+        return
+
+    action = state["action"]
+
+    if action == "wait_entry":
         USER_STATE[user_id]["entry"] = text
         USER_STATE[user_id].pop("action", None)
-        await message.reply_text(f"✅ **Main File Set:** `{text}`\n\nClick DEPLOY now!", reply_markup=get_main_keyboard(user_id))
+        await message.reply_text(f"✅ Entry set to `{text}`\nClick DEPLOY now.", reply_markup=get_main_keyboard(user_id))
+
+    elif action == "wait_env":
+        env_dict = {}
+        for line in text.split("\n"):
+            line = line.strip()
+            if line and "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                env_dict[k.strip()] = v.strip().strip("'\"")
+        if env_dict:
+            USER_STATE[user_id]["env_vars"] = env_dict
+            USER_STATE[user_id].pop("action", None)
+            await message.reply_text(f"✅ {len(env_dict)} env variables saved!\nClick DEPLOY to apply.", reply_markup=get_main_keyboard(user_id))
+        else:
+            await message.reply_text("❌ No valid KEY=VALUE pairs found. Try again or /cancel.")
+
+@app.on_message(filters.command("cancel"))
+async def cancel_cmd(client, message):
+    user_id = message.from_user.id
+    cleanup_state(user_id)
+    await message.reply_text("🚫 Cancelled.", reply_markup=get_main_keyboard(user_id))
 
 if __name__ == "__main__":
-    print("🚀 ANYSNAP - Local Host Manager is Starting...")
+    print("🚀 Simran Hosting Local Runner is Online!")
     app.run()
