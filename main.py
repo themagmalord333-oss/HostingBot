@@ -136,7 +136,7 @@ async def start_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text(
-        "<b>👑 AI-POWERED HOSTING MANAGER</b>\n\n"
+        "<b>👑 ANYSNAP HOSTING MANAGER</b>\n\n"
         "Send any `.zip`, `.py`, or `.js` file via 📎 (Paperclip) icon.\n"
         "Ye bot khud file dhoondhkar chalayega! 🧠🚀", 
         reply_markup=get_main_keyboard(user_id)
@@ -179,12 +179,18 @@ async def callback_handler(client, query: CallbackQuery):
             try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
             except MessageNotModified: return await query.answer("File missing!", show_alert=True)
             
+        # 🔥 FIX: Dono paths ko Absolute Path me convert karna zaroori hai taaki path double na ho
+        exact_entry_path = os.path.abspath(exact_entry_path)
+
         # 2. SMART PROJECT ROOT: Jaha .env ya requirements.txt ho, wahi asli root hai
         project_root = os.path.dirname(exact_entry_path)
         for root, _, files in os.walk(bot_dir):
             if ".env" in files or "requirements.txt" in files:
                 project_root = root
                 break
+                
+        # 🔥 FIX: Root ko bhi absolute bana diya
+        project_root = os.path.abspath(project_root)
 
         # 3. .ENV FILE INJECTOR: .env ko read karke environment variables me daalna
         bot_env_vars = os.environ.copy()
@@ -203,7 +209,7 @@ async def callback_handler(client, query: CallbackQuery):
 
         stop_running_bot(user_id)
 
-        # Ab hum exact file chalayenge, lekin Working Directory project_root rakhenge
+        # Ab hum exact file chalayenge absolute path ke sath
         cmd = [sys.executable, "-u", exact_entry_path] if exact_entry_path.endswith(".py") else ["node", exact_entry_path]
         
         try: 
@@ -215,7 +221,6 @@ async def callback_handler(client, query: CallbackQuery):
             log_path = os.path.join(project_root, "host_manager.log")
             log_file = open(log_path, "a", buffering=1)
             
-            # 🔥 Fix: env=bot_env_vars aur cwd=project_root apply kiya gaya hai
             process = subprocess.Popen(
                 cmd, 
                 cwd=project_root,
@@ -349,5 +354,5 @@ async def text_handler(client, message):
         await message.reply_text(f"✅ **Main File Set:** `{text}`\n\nClick DEPLOY now!", reply_markup=get_main_keyboard(user_id))
 
 if __name__ == "__main__":
-    print("🚀 Ultimate Local Host Manager is Starting...")
+    print("🚀 ANYSNAP - Local Host Manager is Starting...")
     app.run()
