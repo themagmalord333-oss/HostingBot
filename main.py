@@ -6,10 +6,12 @@ import sys
 import time
 import json
 import re
+import asyncio
 import subprocess
 import google.generativeai as genai
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.errors import MessageNotModified
 
 import config
 
@@ -24,10 +26,11 @@ os.makedirs(HOST_DIR, exist_ok=True)
 app = Client("LocalHostManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
-RUNNING_PROCESSES = {} 
+RUNNING_PROCESSES = {}  # Store: {user_id: {"process": Popen_obj, "log_file": file_obj}}
 
 # ================= HELPER FUNCTIONS =================
 def cleanup_state(user_id):
+    """Purane folder aur state ko delete karta hai"""
     state = USER_STATE.get(user_id)
     if state and "dir" in state and os.path.exists(state["dir"]):
         try: shutil.rmtree(state["dir"])
@@ -35,7 +38,26 @@ def cleanup_state(user_id):
     if user_id in USER_STATE:
         del USER_STATE[user_id]
 
+def stop_running_bot(user_id):
+    """Running bot ko safety ke sath kill karta hai aur files close karta hai"""
+    if user_id in RUNNING_PROCESSES:
+        p_data = RUNNING_PROCESSES[user_id]
+        process = p_data.get("process")
+        log_file = p_data.get("log_file")
+        
+        if process:
+            try: process.terminate()
+            except: pass
+        if log_file and not log_file.closed:
+            try: log_file.close()
+            except: pass
+            
+        del RUNNING_PROCESSES[user_id]
+        return True
+    return False
+
 def safe_extract_zip(zip_path, extract_to):
+    """Zip extract karta hai aur path traversal rokta hai"""
     abs_extract_to = os.path.abspath(extract_to)
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         for member in zip_ref.namelist():
@@ -43,6 +65,15 @@ def safe_extract_zip(zip_path, extract_to):
             if not member_path.startswith(abs_extract_to):
                 raise ValueError(f"Security Alert: Path Traversal Detected in {member}")
         zip_ref.extractall(extract_to)
+        
+    # GitHub Zip Flattening: Agar root me bas ek single repo folder hai, use bahar nikalo
+    extracted_items = os.listdir(extract_to)
+    if len(extracted_items) == 1:
+        single_folder = os.path.join(extract_to, extracted_items[0])
+        if os.path.isdir(single_folder):
+            for item in os.listdir(single_folder):
+                shutil.move(os.path.join(single_folder, item), extract_to)
+            os.rmdir(single_folder)
 
 def get_directory_structure(rootdir):
     dir_tree = ""
@@ -56,17 +87,19 @@ def get_directory_structure(rootdir):
     return dir_tree
 
 def ask_gemini_for_entry(bot_dir):
+    """AI se relative path scan karwata hai"""
     tree = get_directory_structure(bot_dir)
     prompt = f"""
     I have extracted a telegram bot's ZIP file. Here is the exact directory tree:
     {tree}
     
     Analyze this structure intelligently. Find the main entry point file used to start the bot.
-    Often it's named main.py, bot.py, app.py, or index.js. 
+    The file could be named anything (e.g., main.py, bot.py, app.py, src/main.py, etc.).
+    Look for the most logical starting file. Provide its RELATIVE PATH from the root directory.
     
-    Respond ONLY with valid JSON and nothing else.
+    Respond ONLY with valid JSON and nothing else. Use this exact format:
     {{
-        "entry_file": "main.py"
+        "entry_file": "relative/path/to/bot.py"
     }}
     """
     try:
@@ -130,7 +163,8 @@ async def callback_handler(client, query: CallbackQuery):
 
     if data == "btn_cancel":
         cleanup_state(user_id)
-        await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
+        try: await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
+        except MessageNotModified: await query.answer("Already cancelled.", show_alert=True)
 
     elif data == "btn_upload_info":
         await query.answer("📎 File upload karne ke liye niche 'Paperclip' icon par click karein!", show_alert=True)
@@ -141,43 +175,69 @@ async def callback_handler(client, query: CallbackQuery):
             return await query.answer("No files found! Please upload a ZIP/PY file first.", show_alert=True)
         
         bot_dir = state["dir"]
-        entry_file_name = os.path.basename(state["entry"]) # Ensure we only use the file name
+        entry_file = state["entry"] # This is now the PROPER relative path (e.g., 'src/main.py')
         
-        # 🎯 BULLETPROOF SEARCH: Code zip ke andar khud main.py ko dhoondhega
-        actual_file_path = None
-        for root, _, files in os.walk(bot_dir):
-            if entry_file_name in files:
-                actual_file_path = os.path.join(root, entry_file_name)
-                break
-                
-        if not actual_file_path:
-            return await query.message.edit_text(f"❌ Deploy Failed: `{entry_file_name}` folder ke andar nahi mili!", reply_markup=get_main_keyboard(user_id))
+        actual_file_path = os.path.join(bot_dir, entry_file)
+        if not os.path.exists(actual_file_path):
+            try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found!", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified: return await query.answer("File missing!", show_alert=True)
             
-        working_directory = os.path.dirname(actual_file_path)
-        
-        if user_id in RUNNING_PROCESSES:
-            try: RUNNING_PROCESSES[user_id].terminate()
-            except: pass
+        # Pura project root directory ko target karenge
+        working_directory = bot_dir 
+        stop_running_bot(user_id)
 
-        cmd = [sys.executable if actual_file_path.endswith(".py") else "node", actual_file_path]
+        # -u flag for unbuffered stdout (real-time logs)
+        cmd = [sys.executable, "-u", entry_file] if entry_file.endswith(".py") else ["node", entry_file]
         
-        await query.message.edit_text(f"🚀 Spawning process...\n📂 Path: `{working_directory}`")
+        try: await query.message.edit_text(f"🚀 Spawning process...\n📂 Project Root: `{working_directory}`\n📄 File: `{entry_file}`")
+        except MessageNotModified: pass
         
         try:
-            # 🎯 DIRECT RUN: Popen exact folder me jaakar command run karega
-            process = subprocess.Popen(cmd, cwd=working_directory)
-            RUNNING_PROCESSES[user_id] = process
-            await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
+            # 🔥 1. PROPER LOGGING:
+            log_path = os.path.join(working_directory, "host_manager.log")
+            log_file = open(log_path, "a", buffering=1)
+            
+            process = subprocess.Popen(
+                cmd, 
+                cwd=working_directory,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL
+            )
+            
+            RUNNING_PROCESSES[user_id] = {"process": process, "log_file": log_file}
+            
+            # 🔥 2. IMMEDIATE CRASH DETECTION:
+            await asyncio.sleep(2) # Thodi der wait karke check karo
+            
+            if process.poll() is not None:
+                # Agar process end ho gaya (crash)
+                stop_running_bot(user_id) # Cleanup
+                
+                # Log file padh ke actual error nikalo
+                try:
+                    with open(log_path, "r") as f:
+                        log_data = f.read()[-3500:] # Aakhri ki lines uthao
+                        if not log_data.strip(): log_data = "No output captured."
+                except Exception:
+                    log_data = "Could not read log file."
+                    
+                error_msg = f"❌ **Bot Crashed Immediately!**\n\n**Log Output:**\n`{log_data}`"
+                try: await query.message.edit_text(error_msg, reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified: pass
+            else:
+                # Agar sab sahi hai
+                try: await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified: pass
+
         except Exception as e:
-            await query.message.edit_text(f"❌ Failed to start: {e}", reply_markup=get_main_keyboard(user_id))
+            try: await query.message.edit_text(f"❌ Failed to start process: {e}", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified: await query.answer(f"Failed: {e}", show_alert=True)
 
     elif data == "btn_stop":
-        process = RUNNING_PROCESSES.get(user_id)
-        if process:
-            try: process.terminate()
-            except: pass
-            del RUNNING_PROCESSES[user_id]
-            await query.message.edit_text("🛑 **Bot process Stopped!**", reply_markup=get_main_keyboard(user_id))
+        if stop_running_bot(user_id):
+            try: await query.message.edit_text("🛑 **Bot process Stopped & Killed safely!**", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified: await query.answer("Bot is already stopped.", show_alert=True)
         else:
             await query.answer("Bot is not running.", show_alert=True)
 
@@ -208,6 +268,7 @@ async def handle_document(client, message):
             shutil.rmtree(bot_dir)
             return await status.edit_text(f"❌ Extraction Error: {e}")
 
+    # Project Root me requirements.txt dhoondho
     req_path = None
     for root, _, files in os.walk(bot_dir):
         if "requirements.txt" in files:
@@ -221,18 +282,26 @@ async def handle_document(client, message):
         if pkgs:
             with open(req_path, "w") as f: f.write("\n".join(pkgs))
 
+    # 🔥 3. PIP INSTALL ERROR HANDLING:
     if req_path and os.path.exists(req_path):
         await status.edit_text("⚙️ Installing packages via pip...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path])
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            shutil.rmtree(bot_dir)
+            return await status.edit_text(
+                "❌ **Package installation failed!**\n\n"
+                f"**Error Log:**\n`{result.stderr[-3500:]}`\n\nPlease check your ZIP's requirements."
+            )
 
     USER_STATE[user_id] = {"dir": bot_dir, "timestamp": time.time()}
     
     if file_ext == "zip":
-        await status.edit_text("🧠 **Gemini AI** is analyzing your folder structure...")
+        await status.edit_text("🧠 **Gemini AI** is analyzing your project structure...")
         ai_result = ask_gemini_for_entry(bot_dir)
         
         if ai_result and "entry_file" in ai_result:
-            entry_file = os.path.basename(ai_result["entry_file"])
+            entry_file = ai_result["entry_file"] # EXACT Relative Path
             USER_STATE[user_id]["entry"] = entry_file
             await status.edit_text(
                 f"🧠 **AI Analysis Complete!**\n"
@@ -242,7 +311,7 @@ async def handle_document(client, message):
             )
         else:
             USER_STATE[user_id]["action"] = "wait_entry"
-            await status.edit_text("🚨 AI could not detect main file!\nSend exact file name manually (e.g. `main.py`):", reply_markup=get_cancel_keyboard())
+            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT relative path manually (e.g. `src/main.py`):", reply_markup=get_cancel_keyboard())
     else:
         entry_file = doc.file_name
         USER_STATE[user_id]["entry"] = entry_file
@@ -266,5 +335,5 @@ async def text_handler(client, message):
         await message.reply_text(f"✅ **Main File Set:** `{text}`\n\nClick DEPLOY now!", reply_markup=get_main_keyboard(user_id))
 
 if __name__ == "__main__":
-    print("🚀 AI-Powered Host Manager is Starting...")
+    print("🚀 Ultimate Local Host Manager is Starting...")
     app.run()
