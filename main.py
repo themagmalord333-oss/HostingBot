@@ -4,6 +4,7 @@ import zipfile
 import time
 import json
 import sqlite3
+import asyncio
 import docker
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -26,10 +27,16 @@ except Exception as e:
     print(f"❌ Docker Error: Make sure Docker daemon is running! Details: {e}")
     exit(1)
 
-app = Client("DockerPaaSManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+app = Client("AnysnapPaaSManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
 RUNNING_CONTAINERS = {}  # {user_id: {"container_id": str}}
+USER_LOCKS = {}          # {user_id: asyncio.Lock()}
+
+def get_user_lock(user_id):
+    if user_id not in USER_LOCKS:
+        USER_LOCKS[user_id] = asyncio.Lock()
+    return USER_LOCKS[user_id]
 
 # ================= DATABASE SETUP =================
 def init_db():
@@ -73,82 +80,111 @@ def restore_state():
     
     for row in db_projects:
         user_id, container_id, p_type, root, status, _ = row
+        if not container_id: continue
         try:
             container = docker_client.containers.get(container_id)
-            if container.status == "running" or container.status == "restarting":
+            if container.status in ["running", "restarting"]:
                 RUNNING_CONTAINERS[user_id] = {"container_id": container_id}
                 print(f"✅ Restored user {user_id} -> {container_id[:8]}")
             else:
                 save_project(user_id, container_id, p_type, root, "stopped")
-        except:
-            save_project(user_id, container_id, p_type, root, "deleted")
+        except docker.errors.NotFound:
+            save_project(user_id, "", p_type, "", "deleted")
+        except Exception as e:
+            print(f"Error restoring {container_id}: {e}")
 
-def stop_user_container(user_id):
-    """Stops, removes container, and prunes old images"""
-    if user_id in RUNNING_CONTAINERS:
-        c_data = RUNNING_CONTAINERS[user_id]
-        try:
-            container = docker_client.containers.get(c_data["container_id"])
-            container.stop(timeout=5)
-            container.remove(force=True)
-        except: pass
-        del RUNNING_CONTAINERS[user_id]
-        save_project(user_id, "", "", "", "stopped")
-    
-    # Cleanup old images to prevent disk bloat
+async def async_stop_user_container(user_id):
+    """Robust non-blocking container stop. Returns True if successful, False if cleanup failed."""
+    if user_id not in RUNNING_CONTAINERS: return True
+    container_id = RUNNING_CONTAINERS[user_id]["container_id"]
     try:
-        images = docker_client.images.list(filters={"reference": f"userbot_{user_id}_*"})
-        for img in images: docker_client.images.remove(image=img.id, force=True)
-    except: pass
-
-def check_zip_security(zip_path):
-    if os.path.getsize(zip_path) > MAX_ZIP_SIZE:
-        raise Exception("ZIP file too large (Max 50MB)")
-    
-    with zipfile.ZipFile(zip_path, "r") as z:
-        if len(z.namelist()) > MAX_FILES:
-            raise Exception(f"Too many files (Max {MAX_FILES})")
+        container = await asyncio.to_thread(docker_client.containers.get, container_id)
+        try: await asyncio.to_thread(container.stop, timeout=5)
+        except Exception: pass
         
-        total_size = sum(file.file_size for file in z.infolist())
-        if total_size > MAX_EXTRACTED_SIZE:
-            raise Exception("Extracted size exceeds limit (Max 200MB)")
+        try: 
+            await asyncio.to_thread(container.remove, force=True)
+        except Exception as e: 
+            print(f"Container remove error: {e}")
+            return False 
+            
+    except docker.errors.NotFound:
+        pass 
+    except Exception as e:
+        print(f"Container cleanup error: {e}")
+        return False
+    
+    RUNNING_CONTAINERS.pop(user_id, None)
+    return True
 
-        for member in z.namelist():
-            if ".." in member or member.startswith("/"):
-                raise Exception("Security: Malicious path traversal detected")
+async def cleanup_old_user_images(user_id, current_tag):
+    """Deletes old images for the user to prevent disk leak."""
+    try:
+        images = await asyncio.to_thread(docker_client.images.list, filters={"reference": f"anysnap_{user_id}_*"})
+        for img in images:
+            if current_tag in img.tags:
+                continue
+            try: await asyncio.to_thread(docker_client.images.remove, image=img.id, force=True)
+            except: pass
+    except Exception as e:
+        print(f"Image cleanup error: {e}")
+
+def check_zip_security(zip_path, extract_to):
+    if os.path.getsize(zip_path) > MAX_ZIP_SIZE: raise Exception("ZIP file too large (Max 50MB)")
+    base = os.path.abspath(extract_to)
+    with zipfile.ZipFile(zip_path, "r") as z:
+        infos = z.infolist()
+        if len(infos) > MAX_FILES: raise Exception(f"Too many files (Max {MAX_FILES})")
+        total_size = sum(i.file_size for i in infos)
+        if total_size > MAX_EXTRACTED_SIZE: raise Exception("Extracted size exceeds limit (Max 200MB)")
+        
+        for info in infos:
+            attr = info.external_attr >> 16
+            if (attr & 0o120000) == 0o120000: raise Exception(f"Security: Symlinks are not allowed: {info.filename}")
+            target = os.path.abspath(os.path.join(extract_to, info.filename))
+            if os.path.commonpath([base, target]) != base: raise Exception(f"Security: Malicious path detected: {info.filename}")
 
 def detect_project_entry(bot_dir):
     for root, _, files in os.walk(bot_dir):
         if "Dockerfile" in files:
-            return {"type": "docker", "cmd": "", "root": root}
-            
+            return {"type": "docker", "cmd": "", "root": root, "is_auto_dockerfile": False}
         if "package.json" in files:
             try:
                 with open(os.path.join(root, "package.json"), 'r') as f:
                     if "start" in json.load(f).get("scripts", {}):
-                        return {"type": "node", "cmd": 'CMD ["npm", "start"]', "root": root}
+                        return {"type": "node", "cmd": 'CMD ["npm", "start"]', "root": root, "is_auto_dockerfile": False}
             except: pass
-            
         if "go.mod" in files or any(f.endswith('.go') for f in files):
-            return {"type": "go", "cmd": 'CMD ["go", "run", "."]', "root": root}
-            
+            return {"type": "go", "cmd": 'CMD ["go", "run", "."]', "root": root, "is_auto_dockerfile": False}
         if "Cargo.toml" in files:
-            return {"type": "rust", "cmd": 'CMD ["cargo", "run", "--release"]', "root": root}
-            
+            return {"type": "rust", "cmd": 'CMD ["cargo", "run", "--release"]', "root": root, "is_auto_dockerfile": False}
         if "composer.json" in files or "index.php" in files:
-            return {"type": "php", "cmd": 'CMD ["php", "-S", "0.0.0.0:8000", "-t", "."]', "root": root}
+            return {"type": "php", "cmd": 'CMD ["php", "-S", "0.0.0.0:8000", "-t", "."]', "root": root, "is_auto_dockerfile": False}
+
+        if "pom.xml" in files:
+            return {"type": "java-maven", "cmd": 'CMD ["sh", "-c", "java -jar target/*.jar"]', "root": root, "is_auto_dockerfile": False}
+        jar_files = [f for f in files if f.endswith(".jar")]
+        if jar_files:
+            return {"type": "java-jar", "cmd": f'CMD ["java", "-jar", "{jar_files[0]}"]', "root": root, "is_auto_dockerfile": False}
+        if any(f.endswith('.java') for f in files):
+            return {"type": "java-single", "cmd": 'CMD ["sh", "-c", "javac *.java && java Main"]', "root": root, "is_auto_dockerfile": False}
 
         if "requirements.txt" in files or any(f.endswith('.py') for f in files):
-            for file in ["main.py", "bot.py", "app.py", "server.py", "run.py"]:
-                if file in files:
-                    return {"type": "python", "cmd": f'CMD ["python", "{file}"]', "root": root}
+            python_priority = ["main.py", "bot.py", "app.py", "server.py", "run.py", "sting.py", "index.py"]
+            for file in python_priority:
+                if file in files: return {"type": "python", "cmd": f'CMD ["python", "{file}"]', "root": root, "is_auto_dockerfile": False}
+            py_files = [f for f in files if f.endswith(".py")]
+            if len(py_files) == 1: return {"type": "python", "cmd": f'CMD ["python", "{py_files[0]}"]', "root": root, "is_auto_dockerfile": False}
+                
     return None
 
 # ================= KEYBOARDS =================
 def get_main_keyboard(user_id):
-    is_running = user_id in RUNNING_CONTAINERS
     kb = [[InlineKeyboardButton("📂 Upload ZIP", callback_data="btn_upload_info")]]
-    if is_running: kb.append([InlineKeyboardButton("🔴 STOP & WIPE", callback_data="btn_stop")])
+    if user_id in RUNNING_CONTAINERS:
+        kb.append([InlineKeyboardButton("🔴 STOP & WIPE", callback_data="btn_stop")])
+    elif user_id in USER_STATE and "type" in USER_STATE[user_id]:
+        kb.append([InlineKeyboardButton("🚀 DEPLOY TO DOCKER", callback_data="btn_deploy")])
     return InlineKeyboardMarkup(kb)
 
 def get_cancel_keyboard():
@@ -169,192 +205,324 @@ def get_logs_keyboard():
         [InlineKeyboardButton("🔄 Restart", callback_data="btn_restart"), InlineKeyboardButton("🔴 Stop", callback_data="btn_stop")]
     ])
 
-# ================= COMMANDS & CALLBACKS =================
+# ================= MESSAGE HANDLERS =================
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text(
-        "<b>🐳 UNIVERSAL DOCKER PAAS</b>\n\n"
-        "Send a `.zip` file! We auto-detect Python, Node, Go, Rust, PHP or Dockerfiles.\n"
-        "If not detected, you can set a custom runtime and startup command.",
+        "<b>🐳 ANYSNAP UNIVERSAL DOCKER PAAS</b>\n\n"
+        "Send a `.zip` file! We auto-detect Python, Node, Go, Rust, PHP, Java, or Dockerfiles.\n"
+        "If not detected, you can set a custom runtime.",
         reply_markup=get_main_keyboard(user_id)
     )
 
+@app.on_message(filters.document & filters.private)
+async def handle_zip_upload(client, message):
+    user_id = message.from_user.id
+    lock = get_user_lock(user_id)
+    
+    if lock.locked():
+        return await message.reply_text("⚠️ An operation is already in progress. Please wait.")
+        
+    async with lock:
+        if not message.document.file_name.endswith('.zip'):
+            return await message.reply_text("❌ Please send a `.zip` file.")
+        if message.document.file_size > MAX_ZIP_SIZE:
+            return await message.reply_text(f"❌ ZIP too large. Max {MAX_ZIP_SIZE//1024//1024}MB allowed.")
+
+        status_msg = await message.reply_text("📥 Downloading ZIP...")
+        
+        # Stop old container before wiping directory
+        await async_stop_user_container(user_id)
+        
+        user_dir = os.path.join(HOST_DIR, str(user_id))
+        shutil.rmtree(user_dir, ignore_errors=True)
+        os.makedirs(user_dir, exist_ok=True)
+        
+        zip_path = os.path.join(user_dir, "project.zip")
+        extract_dir = os.path.join(user_dir, "extracted")
+        
+        try:
+            await message.download(file_name=zip_path)
+            await status_msg.edit_text("🛡️ Checking security and extracting...")
+            check_zip_security(zip_path, extract_dir)
+            
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                z.extractall(extract_dir)
+            os.remove(zip_path) 
+            
+            project_data = detect_project_entry(extract_dir)
+            
+            if project_data:
+                USER_STATE[user_id] = {**project_data, "action": None, "dir": user_dir}
+                await status_msg.edit_text(
+                    f"✅ **Auto-Detected:** `{project_data['type'].upper()}`\n"
+                    f"🚀 **Command:** `{project_data['cmd']}`\n\n"
+                    "Click Deploy to start your container!",
+                    reply_markup=get_main_keyboard(user_id)
+                )
+            else:
+                USER_STATE[user_id] = {"root": extract_dir, "dir": user_dir, "is_auto_dockerfile": True}
+                await status_msg.edit_text(
+                    "⚠️ **Could not auto-detect project type.**\n"
+                    "Please select a runtime environment:",
+                    reply_markup=get_runtime_keyboard()
+                )
+        except Exception as e:
+            shutil.rmtree(user_dir, ignore_errors=True)
+            await status_msg.edit_text(f"❌ **Error:** {e}")
+
+@app.on_message(filters.text & filters.private)
+async def handle_text_input(client, message):
+    user_id = message.from_user.id
+    state = USER_STATE.get(user_id)
+    if not state or not state.get("action"): return
+
+    lock = get_user_lock(user_id)
+    async with lock:
+        if state["action"] == "wait_custom_base":
+            state["custom_base"] = message.text.strip()
+            state["action"] = "wait_command"
+            await message.reply_text(
+                f"✅ Base image set to `{state['custom_base']}`.\n"
+                "Now send the startup command (e.g. `python main.py`):",
+                reply_markup=get_cancel_keyboard()
+            )
+        elif state["action"] == "wait_command":
+            state["cmd"] = message.text.strip()
+            state["is_manual"] = True
+            state["action"] = None
+            await message.reply_text(
+                f"✅ Setup complete!\n🚀 **Command:** `{state['cmd']}`",
+                reply_markup=get_main_keyboard(user_id)
+            )
+
+# ================= CALLBACK HANDLERS =================
 @app.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
+    lock = get_user_lock(user_id)
+
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
 
     if data == "btn_cancel":
-        USER_STATE.pop(user_id, None)
-        try: await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
-        except MessageNotModified: await query.answer("Cancelled")
+        async with lock:
+            state = USER_STATE.pop(user_id, None)
+            if state and state.get("dir"): shutil.rmtree(state["dir"], ignore_errors=True)
+            try: await query.message.edit_text("🚫 Action cancelled.", reply_markup=get_main_keyboard(user_id))
+            except MessageNotModified: await query.answer("Cancelled")
 
     elif data == "btn_upload_info":
         await query.answer("📎 Please upload your project ZIP file!", show_alert=True)
 
     elif data == "btn_stop":
-        stop_user_container(user_id)
-        await query.message.edit_text("🛑 **Stopped and cleaned up!**", reply_markup=get_main_keyboard(user_id))
+        if lock.locked(): return await query.answer("⚠️ Action in progress...", show_alert=True)
+        async with lock:
+            success = await async_stop_user_container(user_id)
+            if success:
+                state = USER_STATE.get(user_id)
+                if state and state.get("dir"): shutil.rmtree(state["dir"], ignore_errors=True)
+                
+                # Full wipe DB state update
+                save_project(user_id, "", "", "", "wiped")
+                USER_STATE.pop(user_id, None)
+                
+                await query.message.edit_text("🛑 **Stopped, workspace wiped & DB cleared!**", reply_markup=get_main_keyboard(user_id))
+            else:
+                await query.answer("⚠️ Failed to remove container fully. Try again.", show_alert=True)
 
-    # --- RUNTIME FALLBACK HANDLERS ---
     elif data.startswith("rt_"):
         runtime = data.split("_")[1]
         state = USER_STATE.get(user_id)
         if not state: return await query.answer("Session expired! Upload ZIP again.", show_alert=True)
 
-        if runtime == "custom":
-            state["action"] = "wait_custom_base"
-            await query.message.edit_text("⚙️ **Custom Runtime**\nSend base image (e.g., `ubuntu:24.04`):", reply_markup=get_cancel_keyboard())
-        else:
-            state["type"] = runtime
-            state["action"] = "wait_command"
-            await query.message.edit_text(f"✅ **{runtime.upper()} Selected!**\nSend startup command (e.g., `python bot.py`):", reply_markup=get_cancel_keyboard())
+        async with lock:
+            if runtime == "custom":
+                state["action"] = "wait_custom_base"
+                state["type"] = "custom"
+                await query.message.edit_text("⚙️ **Custom Runtime**\nSend base image (e.g., `ubuntu:24.04`):", reply_markup=get_cancel_keyboard())
+            elif runtime == "java":
+                state["type"] = "java-single"
+                state["action"] = "wait_command"
+                await query.message.edit_text("☕ **JAVA Selected!**\nSend startup command (e.g., `java -jar app.jar`):", reply_markup=get_cancel_keyboard())
+            else:
+                state["type"] = runtime
+                state["action"] = "wait_command"
+                await query.message.edit_text(f"✅ **{runtime.upper()} Selected!**\nSend startup command:", reply_markup=get_cancel_keyboard())
 
-    # --- DEPLOYMENT LOGIC ---
     elif data == "btn_deploy":
-        state = USER_STATE.get(user_id)
-        if not state or "type" not in state: return await query.answer("Session expired!", show_alert=True)
-        
-        await query.message.edit_text("🏗️ Building Secure Container...")
-        project_type, root = state["type"], state["root"]
+        if lock.locked():
+            return await query.answer("⚠️ A deployment is already in progress!", show_alert=True)
+            
+        async with lock:
+            state = USER_STATE.get(user_id)
+            if not state or "type" not in state: return await query.answer("Session expired! Upload again.", show_alert=True)
+            
+            project_type, root = state["type"], state["root"]
+            image_tag = f"anysnap_{user_id}_{int(time.time())}"
+            container = None
+            
+            success = await async_stop_user_container(user_id)
+            if not success:
+                return await query.answer("❌ Could not stop existing container. Deployment aborted.", show_alert=True)
+            
+            try:
+                await query.message.edit_text("🏗️ Building Image...\n⏳ This may take a moment.")
+                
+                dockerfile_path = os.path.join(root, "Dockerfile")
+                if state.get("is_auto_dockerfile", False):
+                    try: os.remove(dockerfile_path)
+                    except: pass
+
+                if not os.path.exists(dockerfile_path):
+                    state["is_auto_dockerfile"] = True
+                    base_images = {
+                        "node": "node:22-alpine", "go": "golang:1.24-alpine", "rust": "rust:1.76-slim",
+                        "php": "php:8.2-cli", "python": "python:3.12-slim",
+                        "java-maven": "maven:3.9-eclipse-temurin-21",
+                        "java-jar": "eclipse-temurin:21-jre-alpine",
+                        "java-single": "eclipse-temurin:21-jdk-alpine"
+                    }
+                    base_img = base_images.get(project_type, state.get("custom_base", "debian:bookworm-slim"))
+                    
+                    is_manual = state.get("is_manual", False)
+                    safe_cmd = f"CMD {json.dumps(['sh', '-c', state['cmd']])}" if is_manual else state["cmd"]
+                    
+                    install_step = ""
+                    if project_type == "python": install_step = "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\n"
+                    elif project_type == "node": install_step = "RUN npm install\n"
+                    elif project_type == "go": install_step = "RUN go mod download\n"
+                    elif project_type == "java-maven": install_step = "RUN mvn clean package -DskipTests\n"
+                    
+                    df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{safe_cmd}\n"
+                    with open(dockerfile_path, "w") as df: df.write(df_content)
+                
+                await asyncio.to_thread(
+                    docker_client.images.build,
+                    path=root, tag=image_tag, rm=True, mem_limit="1g", forcerm=True
+                )
+                
+                container = await asyncio.to_thread(
+                    docker_client.containers.run,
+                    image_tag, detach=True, mem_limit="512m", nano_cpus=500000000
+                )
+                
+                is_stable = True
+                for _ in range(5):
+                    await asyncio.sleep(2)
+                    await asyncio.to_thread(container.reload)
+                    if container.status != "running":
+                        is_stable = False
+                        break
+                
+                if not is_stable:
+                    logs = (await asyncio.to_thread(container.logs, tail=20)).decode("utf-8", errors="ignore")
+                    
+                    # Ghost container / Image leak prevention on crash
+                    try: await asyncio.to_thread(container.remove, force=True)
+                    except: pass
+                    try: await asyncio.to_thread(docker_client.images.remove, image=image_tag, force=True)
+                    except: pass
+                    
+                    await query.message.edit_text(
+                        f"❌ **Process Crashed!**\n\n"
+                        f"Status: `{container.status}`\n\n"
+                        f"**Logs:**\n```\n{logs[-3000:]}\n```\n\n"
+                        "🔧 Click 'Deploy to Docker' to retry without re-uploading.",
+                        reply_markup=get_main_keyboard(user_id)
+                    )
+                    return
+
+                await asyncio.to_thread(container.update, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                
+                RUNNING_CONTAINERS[user_id] = {"container_id": container.id}
+                save_project(user_id, container.id, project_type, root, "running")
+                
+                # Auto-prune old deployments for this user
+                await cleanup_old_user_images(user_id, current_tag=image_tag)
+                
+                await query.message.edit_text(
+                    "✅ **Deployed & Process Stable!** 🟢\n\n"
+                    f"📦 **ID:** `{container.id[:12]}`\n"
+                    "*(Note: Stable means the process is alive. Check logs to ensure your app logic is fully working.)*",
+                    reply_markup=get_logs_keyboard()
+                )
+                
+            except docker.errors.BuildError as e:
+                build_logs = []
+                for chunk in e.build_log:
+                    if "stream" in chunk: build_logs.append(chunk["stream"])
+                    elif "errorDetail" in chunk:
+                        detail = chunk["errorDetail"]
+                        build_logs.append(detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail))
+                    elif "error" in chunk: build_logs.append(str(chunk["error"]))
+
+                logs_text = "".join(build_logs).strip() or str(e)
+                try: await asyncio.to_thread(docker_client.images.remove, image=image_tag, force=True)
+                except: pass
+
+                await query.message.edit_text(
+                    "❌ **Docker Build Failed!**\n\n"
+                    f"```\n{logs_text[-3500:]}\n```\n\n"
+                    "🔧 Click 'Deploy to Docker' to retry the build.",
+                    reply_markup=get_main_keyboard(user_id)
+                )
+                
+            except Exception as e:
+                # Ghost container / Image leak prevention on generic exception
+                if container is not None:
+                    try: await asyncio.to_thread(container.remove, force=True)
+                    except: pass
+                try: await asyncio.to_thread(docker_client.images.remove, image=image_tag, force=True)
+                except: pass
+                
+                await query.message.edit_text(f"❌ **Deployment Error!**\n\n```\n{str(e)[-3000:]}\n```", reply_markup=get_main_keyboard(user_id))
+
+    elif data.startswith("btn_logs_"):
+        if user_id not in RUNNING_CONTAINERS:
+            return await query.answer("No running container found!", show_alert=True)
         
         try:
-            dockerfile_path = os.path.join(root, "Dockerfile")
-            if not os.path.exists(dockerfile_path):
-                # 1. Image Resolution
-                base_images = {
-                    "node": "node:22-alpine", "go": "golang:1.24-alpine", "rust": "rust:1.76-slim",
-                    "php": "php:8.2-cli", "python": "python:3.12-slim", "java": "eclipse-temurin:21-jre"
-                }
-                base_img = base_images.get(project_type, state.get("custom_base", "debian:bookworm-slim"))
+            container_id = RUNNING_CONTAINERS[user_id]["container_id"]
+            container = await asyncio.to_thread(docker_client.containers.get, container_id)
+            
+            if data == "btn_logs_refresh":
+                logs_bytes = await asyncio.to_thread(container.logs, tail=30)
+                logs = logs_bytes.decode("utf-8", errors="ignore").strip() or "No logs generated yet."
+                text = f"📜 **Latest Logs:**\n```\n{logs[-3500:]}\n```\n\nStatus: `{container.status}`"
+                try: await query.message.edit_text(text, reply_markup=get_logs_keyboard())
+                except MessageNotModified: await query.answer("Logs haven't changed.", show_alert=False)
+                    
+            elif data == "btn_logs_full":
+                await query.answer("Extracting full logs...")
+                logs_bytes = await asyncio.to_thread(container.logs)
+                logs = logs_bytes.decode("utf-8", errors="ignore")
                 
-                # 2. Secure Command Interpolation
-                is_manual = state.get("is_manual", False)
-                if is_manual:
-                    safe_cmd = f"CMD {json.dumps(['sh', '-c', state['cmd']])}"
-                else:
-                    safe_cmd = state["cmd"] # Auto-detected CMD is already safe formatted
-                
-                # 3. Generating Dockerfile
-                install_step = ""
-                if project_type == "python": install_step = "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\n"
-                elif project_type == "node": install_step = "RUN npm install\n"
-                elif project_type == "go": install_step = "RUN go mod download\n"
-                
-                df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{safe_cmd}\n"
-                with open(dockerfile_path, "w") as df: df.write(df_content)
-            
-            # 4. Build & Run
-            image_tag = f"userbot_{user_id}_{int(time.time())}"
-            docker_client.images.build(path=root, tag=image_tag, rm=True)
-            
-            container = docker_client.containers.run(
-                image_tag, detach=True, mem_limit="512m", nano_cpus=500000000,
-                restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}
-            )
-            
-            # 5. Persistence
-            RUNNING_CONTAINERS[user_id] = {"container_id": container.id}
-            save_project(user_id, container.id, project_type, root, "running")
-            
-            await query.message.edit_text(
-                "✅ **Deployed & Running!** 🟢\n\n"
-                f"📦 **ID:** `{container.id[:12]}`\nUse buttons below to manage.",
-                reply_markup=get_logs_keyboard()
-            )
-            
+                log_file = f"logs_{container_id[:8]}.txt"
+                with open(log_file, "w", encoding="utf-8") as f: f.write(logs)
+                await client.send_document(chat_id=user_id, document=log_file, caption=f"📜 Full logs for `{container_id[:8]}`")
+                os.remove(log_file)
         except Exception as e:
-            stop_user_container(user_id)
-            await query.message.edit_text(f"❌ **Deploy Failed:** {e}", reply_markup=get_main_keyboard(user_id))
-
-    # --- LOGS & MANAGEMENT ---
-    elif data.startswith("btn_logs_"):
-        if user_id not in RUNNING_CONTAINERS: return await query.answer("No running container!", show_alert=True)
-        container = docker_client.containers.get(RUNNING_CONTAINERS[user_id]["container_id"])
-        
-        if data == "btn_logs_refresh":
-            logs = container.logs(tail=50).decode("utf-8", errors="ignore").strip() or "No logs yet..."
-            try: await query.message.edit_text(f"📜 **Last 50 Lines:**\n```\n{logs}\n```", reply_markup=get_logs_keyboard())
-            except MessageNotModified: await query.answer("Logs up to date!")
-            
-        elif data == "btn_logs_full":
-            await query.answer("Generating log file...")
-            path = f"logs_{user_id}.txt"
-            with open(path, "wb") as f: f.write(container.logs())
-            await client.send_document(user_id, path, caption="📜 Full Logs")
-            os.remove(path)
+            await query.answer(f"Error fetching logs: {str(e)[:50]}", show_alert=True)
 
     elif data == "btn_restart":
-        if user_id in RUNNING_CONTAINERS:
-            await query.answer("Restarting...")
-            container = docker_client.containers.get(RUNNING_CONTAINERS[user_id]["container_id"])
-            container.restart()
-            await query.message.edit_text("✅ **Restarted!**", reply_markup=get_logs_keyboard())
+        if lock.locked(): return await query.answer("⚠️ Action in progress...", show_alert=True)
+        async with lock:
+            if user_id not in RUNNING_CONTAINERS:
+                return await query.answer("No running container found!", show_alert=True)
+            try:
+                await query.answer("🔄 Restarting container...")
+                container_id = RUNNING_CONTAINERS[user_id]["container_id"]
+                container = await asyncio.to_thread(docker_client.containers.get, container_id)
+                await asyncio.to_thread(container.restart)
+                await query.message.edit_text(f"✅ **Container Restarted!**", reply_markup=get_logs_keyboard())
+            except Exception as e:
+                await query.answer(f"Error restarting: {str(e)[:50]}", show_alert=True)
 
-# ================= UPLOAD HANDLER =================
-@app.on_message(filters.document)
-async def handle_document(client, message):
-    user_id = message.from_user.id
-    if not message.document.file_name.endswith(".zip"): return await message.reply("Only ZIP allowed!")
-
-    stop_user_container(user_id) # Cleanup previous container immediately
-
-    status = await message.reply("📥 Downloading...")
-    bot_dir = os.path.join(HOST_DIR, f"{user_id}_{int(time.time())}")
-    file_path = os.path.join(bot_dir, message.document.file_name)
-    os.makedirs(bot_dir, exist_ok=True)
-    await message.download(file_path)
-
-    try:
-        check_zip_security(file_path)
-        with zipfile.ZipFile(file_path, "r") as z: z.extractall(bot_dir)
-        os.remove(file_path)
-    except Exception as e:
-        shutil.rmtree(bot_dir, ignore_errors=True)
-        return await status.edit(f"❌ Security Error: {e}")
-
-    detection = detect_project_entry(bot_dir)
-    USER_STATE[user_id] = {"dir": bot_dir, "root": bot_dir}
-
-    if detection:
-        USER_STATE[user_id].update(detection)
-        await status.edit(
-            f"✅ **Auto-Detected {detection['type'].upper()} Project!**\n\nClick DEPLOY.", 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 DEPLOY", callback_data="btn_deploy")]])
-        )
-    else:
-        USER_STATE[user_id]["action"] = "wait_runtime"
-        await status.edit("🚨 **Detection failed!** Choose runtime:", reply_markup=get_runtime_keyboard())
-
-# ================= MANUAL INPUT HANDLER =================
-@app.on_message(filters.text & ~filters.command(["start"]))
-async def text_handler(client, message):
-    user_id = message.from_user.id
-    state = USER_STATE.get(user_id)
-    if not state: return
-
-    if state.get("action") == "wait_custom_base":
-        state["custom_base"] = message.text.strip()
-        state["type"] = "custom"
-        state["action"] = "wait_command"
-        await message.reply("✅ Base Image Set! Now send startup command:", reply_markup=get_cancel_keyboard())
-        
-    elif state.get("action") == "wait_command":
-        state["cmd"] = message.text.strip()
-        state["is_manual"] = True
-        state.pop("action", None)
-        await message.reply(
-            f"✅ **Command Set:** `{state['cmd']}`", 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 DEPLOY", callback_data="btn_deploy")]])
-        )
-
-# ================= MAIN RUN =================
 if __name__ == "__main__":
-    print("🚀 Initializing Database & Docker Sync...")
+    print("🚀 Starting Anysnap PaaS Bot...")
     init_db()
     restore_state()
-    print("🤖 Bot is Online!")
     app.run()
