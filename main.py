@@ -26,11 +26,10 @@ os.makedirs(HOST_DIR, exist_ok=True)
 app = Client("LocalHostManager", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 USER_STATE = {}
-RUNNING_PROCESSES = {}  # Store: {user_id: {"process": Popen_obj, "log_file": file_obj}}
+RUNNING_PROCESSES = {} 
 
 # ================= HELPER FUNCTIONS =================
 def cleanup_state(user_id):
-    """Purane folder aur state ko delete karta hai"""
     state = USER_STATE.get(user_id)
     if state and "dir" in state and os.path.exists(state["dir"]):
         try: shutil.rmtree(state["dir"])
@@ -39,7 +38,6 @@ def cleanup_state(user_id):
         del USER_STATE[user_id]
 
 def stop_running_bot(user_id):
-    """Running bot ko safety ke sath kill karta hai aur files close karta hai"""
     if user_id in RUNNING_PROCESSES:
         p_data = RUNNING_PROCESSES[user_id]
         process = p_data.get("process")
@@ -57,7 +55,6 @@ def stop_running_bot(user_id):
     return False
 
 def safe_extract_zip(zip_path, extract_to):
-    """Zip extract karta hai aur path traversal rokta hai"""
     abs_extract_to = os.path.abspath(extract_to)
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         for member in zip_ref.namelist():
@@ -65,15 +62,6 @@ def safe_extract_zip(zip_path, extract_to):
             if not member_path.startswith(abs_extract_to):
                 raise ValueError(f"Security Alert: Path Traversal Detected in {member}")
         zip_ref.extractall(extract_to)
-        
-    # GitHub Zip Flattening: Agar root me bas ek single repo folder hai, use bahar nikalo
-    extracted_items = os.listdir(extract_to)
-    if len(extracted_items) == 1:
-        single_folder = os.path.join(extract_to, extracted_items[0])
-        if os.path.isdir(single_folder):
-            for item in os.listdir(single_folder):
-                shutil.move(os.path.join(single_folder, item), extract_to)
-            os.rmdir(single_folder)
 
 def get_directory_structure(rootdir):
     dir_tree = ""
@@ -87,14 +75,13 @@ def get_directory_structure(rootdir):
     return dir_tree
 
 def ask_gemini_for_entry(bot_dir):
-    """AI se relative path scan karwata hai"""
     tree = get_directory_structure(bot_dir)
     prompt = f"""
     I have extracted a telegram bot's ZIP file. Here is the exact directory tree:
     {tree}
     
     Analyze this structure intelligently. Find the main entry point file used to start the bot.
-    The file could be named anything (e.g., main.py, bot.py, app.py, src/main.py, etc.).
+    The file could be named anything (e.g., main.py, bot.py, app.py, sting.py, etc.).
     Look for the most logical starting file. Provide its RELATIVE PATH from the root directory.
     
     Respond ONLY with valid JSON and nothing else. Use this exact format:
@@ -175,25 +162,38 @@ async def callback_handler(client, query: CallbackQuery):
             return await query.answer("No files found! Please upload a ZIP/PY file first.", show_alert=True)
         
         bot_dir = state["dir"]
-        entry_file = state["entry"] # This is now the PROPER relative path (e.g., 'src/main.py')
-        
+        entry_file = state["entry"]
         actual_file_path = os.path.join(bot_dir, entry_file)
+        
+        # 🔥 SMART FALLBACK SEARCH: Agar strictly path par nahi mila, toh deep search karo
         if not os.path.exists(actual_file_path):
-            try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found!", reply_markup=get_main_keyboard(user_id))
-            except MessageNotModified: return await query.answer("File missing!", show_alert=True)
+            found_paths = []
+            target_name = os.path.basename(entry_file) # extract just "sting.py"
             
-        # Pura project root directory ko target karenge
-        working_directory = bot_dir 
+            for root, _, files in os.walk(bot_dir):
+                if target_name in files:
+                    found_paths.append(os.path.join(root, target_name))
+            
+            if len(found_paths) == 1:
+                actual_file_path = found_paths[0]
+                entry_file = os.path.relpath(actual_file_path, bot_dir) # Update path for UI
+            elif len(found_paths) > 1:
+                try: return await query.message.edit_text(f"❌ Multiple `{target_name}` found! Please type EXACT relative path (e.g. folder/{target_name})", reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified: return await query.answer("Multiple files found!", show_alert=True)
+            else:
+                try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
+                except MessageNotModified: return await query.answer("File missing!", show_alert=True)
+
+        # 🔥 SMART CWD: Jaha file mili, wahi root ban jayega (for .env & requirements)
+        working_directory = os.path.dirname(actual_file_path) 
         stop_running_bot(user_id)
 
-        # -u flag for unbuffered stdout (real-time logs)
-        cmd = [sys.executable, "-u", entry_file] if entry_file.endswith(".py") else ["node", entry_file]
+        cmd = [sys.executable, "-u", actual_file_path] if actual_file_path.endswith(".py") else ["node", actual_file_path]
         
-        try: await query.message.edit_text(f"🚀 Spawning process...\n📂 Project Root: `{working_directory}`\n📄 File: `{entry_file}`")
+        try: await query.message.edit_text(f"🚀 Spawning process...\n📂 Folder: `{os.path.basename(working_directory)}`\n📄 File: `{os.path.basename(actual_file_path)}`")
         except MessageNotModified: pass
         
         try:
-            # 🔥 1. PROPER LOGGING:
             log_path = os.path.join(working_directory, "host_manager.log")
             log_file = open(log_path, "a", buffering=1)
             
@@ -207,17 +207,13 @@ async def callback_handler(client, query: CallbackQuery):
             
             RUNNING_PROCESSES[user_id] = {"process": process, "log_file": log_file}
             
-            # 🔥 2. IMMEDIATE CRASH DETECTION:
-            await asyncio.sleep(2) # Thodi der wait karke check karo
+            await asyncio.sleep(2)
             
             if process.poll() is not None:
-                # Agar process end ho gaya (crash)
-                stop_running_bot(user_id) # Cleanup
-                
-                # Log file padh ke actual error nikalo
+                stop_running_bot(user_id)
                 try:
                     with open(log_path, "r") as f:
-                        log_data = f.read()[-3500:] # Aakhri ki lines uthao
+                        log_data = f.read()[-3500:] 
                         if not log_data.strip(): log_data = "No output captured."
                 except Exception:
                     log_data = "Could not read log file."
@@ -226,7 +222,6 @@ async def callback_handler(client, query: CallbackQuery):
                 try: await query.message.edit_text(error_msg, reply_markup=get_main_keyboard(user_id))
                 except MessageNotModified: pass
             else:
-                # Agar sab sahi hai
                 try: await query.message.edit_text("✅ **Bot is now RUNNING in background!** 🟢", reply_markup=get_main_keyboard(user_id))
                 except MessageNotModified: pass
 
@@ -268,7 +263,6 @@ async def handle_document(client, message):
             shutil.rmtree(bot_dir)
             return await status.edit_text(f"❌ Extraction Error: {e}")
 
-    # Project Root me requirements.txt dhoondho
     req_path = None
     for root, _, files in os.walk(bot_dir):
         if "requirements.txt" in files:
@@ -282,7 +276,6 @@ async def handle_document(client, message):
         if pkgs:
             with open(req_path, "w") as f: f.write("\n".join(pkgs))
 
-    # 🔥 3. PIP INSTALL ERROR HANDLING:
     if req_path and os.path.exists(req_path):
         await status.edit_text("⚙️ Installing packages via pip...")
         result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, text=True)
@@ -301,17 +294,17 @@ async def handle_document(client, message):
         ai_result = ask_gemini_for_entry(bot_dir)
         
         if ai_result and "entry_file" in ai_result:
-            entry_file = ai_result["entry_file"] # EXACT Relative Path
+            entry_file = ai_result["entry_file"] 
             USER_STATE[user_id]["entry"] = entry_file
             await status.edit_text(
                 f"🧠 **AI Analysis Complete!**\n"
-                f"📂 Entry File: `{entry_file}`\n\n"
+                f"📂 Entry File: `{os.path.basename(entry_file)}`\n\n"
                 f"Click **DEPLOY & RUN LOCAL** to start it.",
                 reply_markup=get_main_keyboard(user_id)
             )
         else:
             USER_STATE[user_id]["action"] = "wait_entry"
-            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT relative path manually (e.g. `src/main.py`):", reply_markup=get_cancel_keyboard())
+            await status.edit_text("🚨 AI could not detect main file!\nSend EXACT file name (e.g. `sting.py`):", reply_markup=get_cancel_keyboard())
     else:
         entry_file = doc.file_name
         USER_STATE[user_id]["entry"] = entry_file
