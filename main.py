@@ -184,12 +184,14 @@ async def callback_handler(client, query: CallbackQuery):
                 try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
                 except MessageNotModified: return await query.answer("File missing!", show_alert=True)
 
-        # 🔥 SMART CWD: Jaha file mili, wahi root ban jayega (for .env & requirements)
-        working_directory = os.path.dirname(actual_file_path) 
+                # 🔥 SMART CWD: Jaha file mili, wahi root ban jayega (for .env & requirements)
+        working_directory = os.path.abspath(os.path.dirname(actual_file_path))
         stop_running_bot(user_id)
-
-        cmd = [sys.executable, "-u", actual_file_path] if actual_file_path.endswith(".py") else ["node", actual_file_path]
         
+        # Exact file name pass karenge taaki path append/duplicate na ho
+        target_file_name = os.path.basename(actual_file_path)
+        cmd = [sys.executable, "-u", target_file_name] if target_file_name.endswith(".py") else ["node", target_file_name]
+    
         try: await query.message.edit_text(f"🚀 Spawning process...\n📂 Folder: `{os.path.basename(working_directory)}`\n📄 File: `{os.path.basename(actual_file_path)}`")
         except MessageNotModified: pass
         
