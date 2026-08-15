@@ -164,39 +164,62 @@ async def callback_handler(client, query: CallbackQuery):
         bot_dir = state["dir"]
         entry_file = state["entry"]
         
-        # 🔥 SMART DEEP SEARCH: ZIP ke andar kahin bhi file ho, dhund lo
-        found_file = None
-        target_name = os.path.basename(entry_file)
+        # 1. Entry file ka exact path nikalna
+        exact_entry_path = os.path.normpath(os.path.join(bot_dir, entry_file))
         
-        for root, _, files in os.walk(bot_dir):
-            if target_name in files:
-                found_file = os.path.join(root, target_name)
-                break
+        # Agar Gemini ka path thoda galat ho, toh fallback search karega
+        if not os.path.exists(exact_entry_path):
+            target_name = os.path.basename(entry_file)
+            for root, _, files in os.walk(bot_dir):
+                if target_name in files:
+                    exact_entry_path = os.path.join(root, target_name)
+                    break
                 
-        if not found_file:
+        if not exact_entry_path or not os.path.exists(exact_entry_path):
             try: return await query.message.edit_text(f"❌ Deploy Failed: Entry file `{entry_file}` not found anywhere in the ZIP!", reply_markup=get_main_keyboard(user_id))
             except MessageNotModified: return await query.answer("File missing!", show_alert=True)
             
-        # 🔥 SMART CWD: Jaha file mili, wahi project ka root banega (taaki .env aur requirements match ho sakein)
-        working_directory = os.path.dirname(found_file)
-        target_file_name = os.path.basename(found_file)
-        
+        # 2. SMART PROJECT ROOT: Jaha .env ya requirements.txt ho, wahi asli root hai
+        project_root = os.path.dirname(exact_entry_path)
+        for root, _, files in os.walk(bot_dir):
+            if ".env" in files or "requirements.txt" in files:
+                project_root = root
+                break
+
+        # 3. .ENV FILE INJECTOR: .env ko read karke environment variables me daalna
+        bot_env_vars = os.environ.copy()
+        env_file_path = os.path.join(project_root, ".env")
+        if os.path.exists(env_file_path):
+            try:
+                with open(env_file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        # Ignore comments and empty lines
+                        if line and not line.startswith("#") and "=" in line:
+                            key, val = line.split("=", 1)
+                            bot_env_vars[key.strip()] = val.strip().strip("'\"")
+            except Exception as e:
+                print(f"Failed to load .env file: {e}")
+
         stop_running_bot(user_id)
 
-        cmd = [sys.executable, "-u", target_file_name] if target_file_name.endswith(".py") else ["node", target_file_name]
+        # Ab hum exact file chalayenge, lekin Working Directory project_root rakhenge
+        cmd = [sys.executable, "-u", exact_entry_path] if exact_entry_path.endswith(".py") else ["node", exact_entry_path]
         
         try: 
-            await query.message.edit_text(f"🚀 Spawning process...\n📂 Folder: `{os.path.basename(working_directory)}`\n📄 File: `{target_file_name}`")
+            await query.message.edit_text(f"🚀 Spawning process...\n📂 Root: `{os.path.basename(project_root)}`\n📄 File: `{os.path.basename(exact_entry_path)}`")
         except MessageNotModified: 
             pass
         
         try:
-            log_path = os.path.join(working_directory, "host_manager.log")
+            log_path = os.path.join(project_root, "host_manager.log")
             log_file = open(log_path, "a", buffering=1)
             
+            # 🔥 Fix: env=bot_env_vars aur cwd=project_root apply kiya gaya hai
             process = subprocess.Popen(
                 cmd, 
-                cwd=working_directory,
+                cwd=project_root,
+                env=bot_env_vars,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL
@@ -204,8 +227,8 @@ async def callback_handler(client, query: CallbackQuery):
             
             RUNNING_PROCESSES[user_id] = {"process": process, "log_file": log_file}
             
-            # Crash Detection check after 2 seconds
-            await asyncio.sleep(2)
+            # Crash Detection check after 3 seconds
+            await asyncio.sleep(3)
             
             if process.poll() is not None:
                 stop_running_bot(user_id)
