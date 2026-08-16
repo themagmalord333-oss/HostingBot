@@ -430,11 +430,11 @@ async def render_dashboard(client, message, user_id, is_edit=False):
     proj = await asyncio.to_thread(projects_col.find_one, {"user_id": user_id})
     if not proj:
         text = ("╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
-                "┃  🐳 MAGMA CLOUD      ┃\n"
+                "┃  🐳 ANYSNAP CLOUD    ┃\n"
                 "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                 "No active projects detected.\n"
                 "**Deploy:** Send `.zip` or `.py` file.\n\n"
-                "*(Powered by MAGMA)*")
+                "*(Powered by ANYSNAP & MAGMA)*")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Upload Project", callback_data="btn_none")]])
     else:
         status = str(proj.get("status", "UNKNOWN")).upper()
@@ -460,11 +460,11 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             cpu, ram, disk = (node_stats['cpu'], node_stats['ram'], node_stats['disk']) if node_stats else (0.0, 0.0, 0.0)
             
             text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
-                    f"┃  🐳 MAGMA CLOUD      ┃\n"
+                    f"┃  🐳 ANYSNAP CLOUD    ┃\n"
                     f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                     f"{emoji}  **{status}**\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🤖  `{proj.get('project_name', 'Magma App')}`\n"
+                    f"🤖  `{proj.get('project_name', 'Anysnap App')}`\n"
                     f"🐍  `{str(proj.get('type', 'UNKNOWN')).upper()} • {proj.get('entry', 'main.py')}`\n\n"
                     f"🖥️  NODE\n"
                     f"└─ #{proj.get('target_node', 1)} {'MASTER' if proj.get('target_node', 1) == 1 else 'WORKER'}\n\n")
@@ -516,6 +516,18 @@ async def stats_cmd(client, message):
     disk = psutil.disk_usage('/')
     text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 📊 CLUSTER STATISTICS ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🖥️ **Master Node (Node 1)**\n⚡ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n💿 DISK: `{disk.percent}%`\n\n🤖 **Global Status**\n🟢 Running Bots: `{total_bots}`\n━━━━━━━━━━━━━━━━━━━━━━")
     await message.reply_text(text)
+
+@app.on_message(filters.command("owner"))
+async def owner_cmd(client, message):
+    if not is_owner(message.from_user.id): return await message.reply_text("❌ Access Denied.")
+    auto = get_auto_approve()
+    pending = await asyncio.to_thread(projects_col.count_documents, {"status": "PENDING_APPROVAL"})
+    running = await asyncio.to_thread(projects_col.count_documents, {"status": "RUNNING"})
+    total = await asyncio.to_thread(projects_col.count_documents, {})
+    online_nodes = await asyncio.to_thread(nodes_col.count_documents, {"last_seen": {"$gt": time.time() - 30}})
+    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 👑 OWNER CONTROL     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🤖 AUTO APPROVE  {'🟢 ON' if auto else '🔴 OFF'}\n━━━━━━━━━━━━━━━━━━━━━━\n\n⏳ Pending       `{pending}`\n🟢 Running       `{running}`\n📦 Projects      `{total}`\n🌐 Nodes Online  `{online_nodes}`\n\n━━━━━━━━━━━━━━━━━━━━━━\n🎛 OWNER CONTROLS")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🟢 Auto Approve ON", callback_data="owner_auto_on"), InlineKeyboardButton("🔴 Auto Approve OFF", callback_data="owner_auto_off")], [InlineKeyboardButton("⏳ Pending", callback_data="owner_pending"), InlineKeyboardButton("🤖 Projects", callback_data="owner_projects")], [InlineKeyboardButton("🌐 Nodes", callback_data="owner_nodes"), InlineKeyboardButton("📊 Statistics", callback_data="owner_stats")], [InlineKeyboardButton("🔄 Refresh", callback_data="owner_panel")]])
+    await message.reply_text(text, reply_markup=kb)
 
 @app.on_message(filters.document & filters.private)
 async def handle_document_upload(client, message):
@@ -599,6 +611,17 @@ async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
 
+    owner_actions = data.startswith("owner_") or data.startswith("approve_") or data.startswith("reject_")
+    if owner_actions and not is_owner(user_id):
+        return await query.answer("❌ Owner Only!", show_alert=True)
+
+    if data == "owner_auto_on": 
+        set_auto_approve(True); await query.answer("🟢 Auto Approve ON", show_alert=True)
+    elif data == "owner_auto_off": 
+        set_auto_approve(False); await query.answer("🔴 Auto Approve OFF", show_alert=True)
+    elif data == "owner_panel": 
+        await query.answer()
+
     if data == "btn_refresh_dash": 
         await query.answer("🔄 Refreshed", show_alert=False)
         return await render_dashboard(client, query.message, user_id, is_edit=True)
@@ -624,7 +647,7 @@ async def callback_handler(client, query: CallbackQuery):
         auto_approve = get_auto_approve()
         initial_status = "QUEUED" if auto_approve else "PENDING_APPROVAL"
         
-        db_doc = {"user_id": user_id, "target_node": target_node, "status": initial_status, "type": state.get("type", "python"), "entry": state.get("entry", "main.py"), "file_id": file_id, "env_vars": state.get("env_vars", {}), "project_name": state.get("project_name", "Magma App"), "created_at": time.time(), "last_action_time": time.time()}
+        db_doc = {"user_id": user_id, "target_node": target_node, "status": initial_status, "type": state.get("type", "python"), "entry": state.get("entry", "main.py"), "file_id": file_id, "env_vars": state.get("env_vars", {}), "project_name": state.get("project_name", "Anysnap App"), "created_at": time.time(), "last_action_time": time.time()}
         
         await asyncio.to_thread(projects_col.delete_many, {"user_id": user_id})
         result = await asyncio.to_thread(projects_col.insert_one, db_doc)
@@ -636,7 +659,6 @@ async def callback_handler(client, query: CallbackQuery):
             except Exception: pass
             USER_STATE.pop(user_id, None); cleanup_workspace(user_id); return
 
-        # Start background animation for Deploy
         anim_task = asyncio.create_task(animate_status(prog_msg, project_id, "deploy"))
 
         if target_node == NODE_ID: 
@@ -746,13 +768,12 @@ async def callback_handler(client, query: CallbackQuery):
             try: 
                 c = await asyncio.to_thread(docker_client.containers.get, cid)
                 logs = (await asyncio.to_thread(c.logs, tail=50)).decode("utf-8", errors="ignore")
-            except: logs = "Log retrieval error."
+            except: logs = "Log retrieval error. Container might be down."
             await query.message.edit_text(f"📜 **LOGS (Node 1):**\n```\n{logs[-2000:]}\n```", reply_markup=kb)
         else:
             await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"action": "get_logs"}})
             await query.message.edit_text("⏳ Fetching logs from remote node (Fast Polling)...", reply_markup=InlineKeyboardMarkup([]))
             
-            # Fast Non-blocking Polling (350ms interval ~ 7 seconds max wait)
             for _ in range(20): 
                 await asyncio.sleep(0.35)
                 p = await asyncio.to_thread(projects_col.find_one, {"_id": proj["_id"]})
@@ -828,23 +849,19 @@ async def callback_handler(client, query: CallbackQuery):
         await query.message.edit_text("✅ Project Deleted & Resources Wiped.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Return Home", callback_data="btn_refresh_dash")]]))
 
 # ================= RUNNERS =================
-async def main_node():
-    print("⏳ Starting Background Tasks...")
-    asyncio.create_task(heartbeat_loop())
-    
-    print("👑 MAGMA CLOUD MASTER NODE STARTED: Listening for Telegram messages...")
-    await app.start()
-    await idle()
-    await app.stop()
-
 if __name__ == "__main__":
+    try: 
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    print("⏳ Starting Background Tasks...")
+    loop.create_task(heartbeat_loop())
+    
     if NODE_ID == 1:
-        asyncio.run(main_node())
+        print("👑 ANYSNAP CLOUD MASTER NODE STARTED: Listening for Telegram messages...")
+        app.run()  # <-- BATTLE TESTED PYROGRAM RUNNER (Ye freeze nahi hota)
     else:
-        print(f"👷 MAGMA CLOUD WORKER NODE #{NODE_ID} STARTED: Background Processing...")
-        
-        async def run_worker():
-            asyncio.create_task(heartbeat_loop())
-            await worker_node_loop()
-            
-        asyncio.run(run_worker())
+        print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} STARTED: Background Processing...")
+        loop.run_until_complete(worker_node_loop())
