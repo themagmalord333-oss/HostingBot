@@ -2,7 +2,7 @@ name: Anysnap Cloud Runner
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       node_id:
@@ -10,15 +10,25 @@ on:
         required: true
         default: '1'
 
+concurrency:
+  group: anysnap-cloud-runner-${{ github.event.inputs.node_id || '1' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 360 
+
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -40,10 +50,10 @@ jobs:
           GITHUB_REPO: ${{ secrets.REPO_NAME }}
           WORKFLOW_FILE: ${{ secrets.WORKFLOW_FILE }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
-          NODE_ID: "1"
+          NODE_ID: ${{ github.event.inputs.node_id || '1' }}
           PYTHONUNBUFFERED: "1"
         run: |
           echo "======================================"
-          echo "🚀 ANYSNAP CLOUD STARTING"
+          echo "🚀 ANYSNAP CLOUD STARTING ON NODE: $NODE_ID"
           echo "======================================"
           python -u main.py
