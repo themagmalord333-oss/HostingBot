@@ -462,15 +462,18 @@ async def render_dashboard(client, message, user_id, is_edit=False):
 # ================= MESSAGE HANDLERS =================
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
+    print(f"📥 MESSAGE RECEIVED: /start from user {message.from_user.id}")
     await render_dashboard(client, message, message.from_user.id, is_edit=False)
 
 @app.on_message(filters.command("owner"))
 async def owner_cmd(client, message):
+    print(f"📥 MESSAGE RECEIVED: /owner from user {message.from_user.id}")
     if not is_owner(message.from_user.id): return await message.reply_text("❌ Access Denied.")
     await owner_panel(message)
 
 @app.on_message(filters.document & filters.private)
 async def handle_document_upload(client, message):
+    print(f"📥 FILE RECEIVED: Document from user {message.from_user.id}")
     user_id = message.from_user.id
     doc = message.document
     is_py_file = doc.file_name.endswith('.py')
@@ -542,6 +545,7 @@ async def text_handler(client, message):
 async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
+    print(f"👆 BUTTON CLICKED: {data} by user {user_id}")
 
     owner_actions = data.startswith("owner_") or data.startswith("approve_") or data.startswith("reject_") or data.startswith("admin_")
     if owner_actions and not is_owner(user_id):
