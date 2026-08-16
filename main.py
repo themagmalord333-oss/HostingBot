@@ -131,7 +131,6 @@ def check_zip_security(zip_path, extract_to):
 
 def detect_project_entry(bot_dir):
     # 1. PRIORITY SCAN: Universal Deep Scan for Python & Node FIRST
-    # Isse agar ZIP me kachra Dockerfile hoga, toh ye ignore karke apna perfect banayega.
     for root, _, files in os.walk(bot_dir):
         files_lower = [f.lower() for f in files]
         rel_dir = os.path.relpath(root, bot_dir)
@@ -144,7 +143,6 @@ def detect_project_entry(bot_dir):
             python_priority = ["main.py", "bot.py", "app.py", "server.py", "run.py", "sting.py", "index.py"]
             for file in python_priority:
                 if file in files: 
-                    # is_auto_dockerfile = True ensure karta hai ki purana Dockerfile delete ho jaye
                     return {"type": "python", "cmd": f'CMD ["sh", "-c", "{cd_cmd}python {file}"]', "root": bot_dir, "is_auto_dockerfile": True}
             if len(py_files) >= 1: 
                 return {"type": "python", "cmd": f'CMD ["sh", "-c", "{cd_cmd}python {py_files[0]}"]', "root": bot_dir, "is_auto_dockerfile": True}
@@ -157,7 +155,7 @@ def detect_project_entry(bot_dir):
                         return {"type": "node", "cmd": f'CMD ["sh", "-c", "{cd_cmd}npm start"]', "root": bot_dir, "is_auto_dockerfile": True}
             except: pass
 
-    # 2. FALLBACK SCAN: Agar Python/Node nahi mila, tabhi Custom Dockerfile check karo
+    # 2. FALLBACK SCAN: Custom Dockerfile check
     for root, _, files in os.walk(bot_dir):
         files_lower = [f.lower() for f in files]
         if "dockerfile" in files_lower:
@@ -199,7 +197,7 @@ async def start_cmd(client, message):
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text(
         "<b>🐳 ANYSNAP UNIVERSAL RUNNER</b>\n\n"
-        "Sirf apna `.zip` file bhejo! Nested folders, requirements, sab automatically detect ho jayega.",
+        "Sirf apna `.zip` file bhejo! Nested folders, missing packages (like dotenv), sab auto-handle hoga.",
         reply_markup=get_main_keyboard(user_id)
     )
 
@@ -331,7 +329,6 @@ async def callback_handler(client, query: CallbackQuery):
                 
                 dockerfile_path = os.path.join(root, "Dockerfile")
                 
-                # Ye line ensure karti hai ki purana bekar Dockerfile remove ho jaye
                 if state.get("is_auto_dockerfile", False):
                     try: os.remove(dockerfile_path)
                     except: pass
@@ -344,25 +341,20 @@ async def callback_handler(client, query: CallbackQuery):
                     safe_cmd = f"CMD {json.dumps(['sh', '-c', state['cmd']])}" if is_manual else state["cmd"]
                     
                     install_step = ""
-                    # =============== NEW BULLETPROOF INSTALL LOGIC ===============
+                    # =============== AUTO-DOTENV INJECT & -EXEC LOGIC ===============
                     if project_type == "python": 
                         install_step = (
                             "RUN apt-get update && "
                             "apt-get install -y --no-install-recommends gcc g++ make build-essential && "
                             "rm -rf /var/lib/apt/lists/*\n"
-                            
-                            "RUN python -m pip install --no-cache-dir --upgrade "
-                            "pip setuptools wheel\n"
-                            
-                            "RUN find /app -type f -iname 'requirements.txt' -print0 | "
-                            "while IFS= read -r -d '' req; do "
-                            "echo \"📦 Installing $req\"; "
-                            "python -m pip install --no-cache-dir -r \"$req\"; "
-                            "done\n"
+                            "RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel\n"
+                            "RUN python -m pip install --no-cache-dir python-dotenv\n"
+                            "RUN find /app -type f -iname 'requirements.txt' "
+                            "-exec python -m pip install --no-cache-dir -r '{}' \\;\n"
                         )
                     elif project_type == "node": 
                         install_step = "RUN find /app -type f -name 'package.json' -execdir npm install \\;\n"
-                    # ===========================================================
+                    # ================================================================
                     
                     df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{safe_cmd}\n"
                     with open(dockerfile_path, "w") as df: df.write(df_content)
