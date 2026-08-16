@@ -1,17 +1,42 @@
-- name: Run Node
+name: Auto Restart Anysnap Cloud
+
+on:
+  workflow_dispatch: # Iski wajah se aap Github se abhi khud button daba kar purana kachra saaf kar sakte hain
+  workflow_run:
+    workflows: ["Anysnap Cloud Runner"]
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  restart-and-clean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wait Before Restart
+        run: sleep 10
+
+      - name: Start Next Bot Run
         env:
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          MONGO_URI: ${{ secrets.MONGO_URI }}
-          GH_PERSONAL_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
-          GITHUB_REPO: ${{ secrets.REPO_NAME }}
-          WORKFLOW_FILE: ${{ secrets.WORKFLOW_FILE }}
-          OWNER_ID: ${{ secrets.OWNER_ID }}
-          NODE_ID: "1"
-          PYTHONUNBUFFERED: "1"
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
         run: |
-          echo "======================================"
-          echo "🚀 ANYSNAP CLOUD STARTING"
-          echo "======================================"
-          python -u main.py
+          echo "Previous Anysnap Cloud run completed."
+          echo "Starting next Anysnap Cloud run..."
+
+          gh workflow run "Anysnap Cloud Runner" \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f node_id=1
+
+          echo "✅ Next Anysnap Cloud run triggered successfully."
+
+      - name: Delete Old Actions History
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GH_PERSONAL_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 8
