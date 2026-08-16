@@ -14,8 +14,16 @@
           echo "======================================"
           echo "🚀 ANYSNAP CLOUD STARTING"
           echo "======================================"
+
+          echo "Python version:"
           python --version
-          test -f main.py && echo "✅ main.py found" || { echo "❌ missing"; exit 1; }
+
+          echo ""
+          echo "Checking main.py..."
+          test -f main.py && echo "✅ main.py found" || { echo "❌ main.py missing"; exit 1; }
+
+          echo ""
           echo "Starting main.py..."
           echo "======================================"
+
           python -u main.py
