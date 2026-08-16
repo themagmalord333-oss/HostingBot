@@ -1,4 +1,4 @@
-- name: Run Node
+      - name: Run Node
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
@@ -14,16 +14,4 @@
           echo "======================================"
           echo "🚀 ANYSNAP CLOUD STARTING"
           echo "======================================"
-
-          echo "Python version:"
-          python --version
-
-          echo ""
-          echo "Checking main.py..."
-          test -f main.py && echo "✅ main.py found" || { echo "❌ main.py missing"; exit 1; }
-
-          echo ""
-          echo "Starting main.py..."
-          echo "======================================"
-
           python -u main.py
