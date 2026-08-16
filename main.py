@@ -17,8 +17,8 @@ import config
 
 # ================= CONFIG & GLOBALS =================
 HOST_DIR = "hosted_containers"
-MAX_ZIP_SIZE = 50 * 1024 * 1024       
-MAX_EXTRACTED_SIZE = 200 * 1024 * 1024 
+MAX_ZIP_SIZE = 50 * 1024 * 1024       # 50MB limit
+MAX_EXTRACTED_SIZE = 200 * 1024 * 1024 # 200MB limit
 MAX_FILES = 500
 MAX_ACTIONS = 7
 
@@ -35,7 +35,7 @@ except Exception as e:
 
 # ================= MONGODB SETUP (GRIDFS & DB) =================
 try:
-    mongo_client = MongoClient(getattr(config, "MONGO_URI", os.getenv("MONGO_URI")))
+    mongo_client = MongoClient(config.MONGO_URI)
     db = mongo_client["anysnap_paas"]
     projects_col = db["projects"]
     fs = gridfs.GridFS(db)
@@ -62,9 +62,9 @@ def check_system_full():
 
 def trigger_github_worker(target_node):
     """Triggers the next Github Action workflow"""
-    token = getattr(config, "GITHUB_TOKEN", os.getenv("GITHUB_TOKEN"))
-    repo = getattr(config, "GITHUB_REPO", os.getenv("GITHUB_REPO"))
-    workflow = getattr(config, "WORKFLOW_FILE", os.getenv("WORKFLOW_FILE", "main.yml"))
+    token = config.GH_PERSONAL_TOKEN
+    repo = config.GITHUB_REPO
+    workflow = config.WORKFLOW_FILE
     
     url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
@@ -85,7 +85,8 @@ async def deploy_docker_container(user_id, root, project_type, cmd, is_auto_dock
     if not os.path.exists(dockerfile_path):
         base_img = "python:3.12-slim" if project_type == "python" else "node:22-alpine"
         install_step = ""
-        # 🔥 TUMHARA AUTO-DOTENV AUR NESTED INSTALL SYSTEM
+        
+        # =============== BULLETPROOF INSTALL LOGIC ===============
         if project_type == "python": 
             install_step = (
                 "RUN apt-get update && "
@@ -98,6 +99,7 @@ async def deploy_docker_container(user_id, root, project_type, cmd, is_auto_dock
             )
         elif project_type == "node": 
             install_step = "RUN find /app -type f -iname 'package.json' -execdir npm install \\;\n"
+        # =========================================================
         
         df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{cmd}\n"
         with open(dockerfile_path, "w") as df: df.write(df_content)
@@ -126,14 +128,11 @@ async def deploy_docker_container(user_id, root, project_type, cmd, is_auto_dock
 async def worker_node_loop():
     print(f"👷 WORKER NODE #{NODE_ID} ACTIVE! Scanning MongoDB for jobs...")
     while True:
-        # 1. Naya deployment task dhundo
         task = projects_col.find_one({"target_node": NODE_ID, "status": "pending"})
         if task:
             print(f"📦 Found task for User {task['user_id']}")
             projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "deploying"}})
-            
             try:
-                # MongoDB se ZIP download karo
                 file_data = fs.get(task["file_id"]).read()
                 work_dir = os.path.join(HOST_DIR, str(task["user_id"]))
                 os.makedirs(work_dir, exist_ok=True)
@@ -143,9 +142,7 @@ async def worker_node_loop():
                 extract_dir = os.path.join(work_dir, "extracted")
                 with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(extract_dir)
                 
-                # Deploy
                 success, result = await deploy_docker_container(task["user_id"], extract_dir, task["type"], task["cmd"])
-                
                 if success:
                     projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "running", "container_id": result}})
                 else:
@@ -154,7 +151,6 @@ async def worker_node_loop():
                 print(f"Worker deploy error: {e}")
                 projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "error"}})
 
-        # 2. Stop/Restart/Logs ki commands dhundo
         cmd_task = projects_col.find_one({"target_node": NODE_ID, "action": {"$exists": True}})
         if cmd_task:
             action = cmd_task["action"]
@@ -175,7 +171,7 @@ async def worker_node_loop():
                 except:
                     projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}})
                     
-        await asyncio.sleep(3) # Reduce database load
+        await asyncio.sleep(3)
 
 # ================= MASTER NODE LOGIC (Pyrogram) =================
 def detect_project_entry(bot_dir):
@@ -274,7 +270,6 @@ async def callback_handler(client, query: CallbackQuery):
             await query.message.edit_text("📊 Checking Cloud Resources...")
             is_full = check_system_full()
             
-            # Master/Worker Routing Logic
             cluster = db.cluster.find_one({"_id": "status"})
             active_nodes = cluster["active_nodes"] if cluster else 1
             
@@ -285,7 +280,6 @@ async def callback_handler(client, query: CallbackQuery):
                 target_node = active_nodes + 1
                 await query.message.edit_text(f"⚠️ Node 1 Full! Uploading to MongoDB for Node #{target_node}...")
                 
-                # ZIP GridFS me dalo Worker ke liye
                 with open(state["zip_path"], "rb") as f:
                     file_id = fs.put(f, filename=f"user_{user_id}.zip")
                 
@@ -294,9 +288,7 @@ async def callback_handler(client, query: CallbackQuery):
                 
                 trigger_github_worker(target_node)
                 await query.message.edit_text(f"✅ **Sent to Cloud Node #{target_node}!**\nGithub Action boot ho raha hai. Thodi der me Logs check karein.", reply_markup=get_logs_keyboard())
-            
             else:
-                # Master node local run
                 await query.message.edit_text("🏗️ Setting up on Master Node...")
                 success, result = await deploy_docker_container(user_id, root, project_type, cmd)
                 if success:
