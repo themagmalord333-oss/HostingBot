@@ -392,14 +392,16 @@ async def callback_handler(client, query: CallbackQuery):
                     
                     install_step = ""
                     if project_type == "python": 
+                        req_exists = os.path.exists(os.path.join(root, "requirements.txt"))
                         install_step = (
                             "RUN apt-get update && "
                             "apt-get install -y --no-install-recommends gcc build-essential && "
                             "rm -rf /var/lib/apt/lists/*\n"
-                            "RUN if [ -f requirements.txt ]; then "
-                            "pip install --no-cache-dir -r requirements.txt; "
-                            "else echo '⚠️ WARNING: requirements.txt not found, skipping dependencies.'; fi\n"
                         )
+                        # STRICT dependencies check. No silent skips!
+                        if req_exists:
+                            install_step += "RUN pip install --no-cache-dir -r requirements.txt\n"
+                            
                     elif project_type == "node": install_step = "RUN npm install\n"
                     elif project_type == "go": install_step = "RUN go mod download\n"
                     elif project_type == "java-maven": install_step = "RUN mvn clean package -DskipTests\n"
