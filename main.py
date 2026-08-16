@@ -391,7 +391,13 @@ async def callback_handler(client, query: CallbackQuery):
                     safe_cmd = f"CMD {json.dumps(['sh', '-c', state['cmd']])}" if is_manual else state["cmd"]
                     
                     install_step = ""
-                    if project_type == "python": install_step = "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\n"
+                    if project_type == "python": 
+                        install_step = (
+                            "RUN apt-get update && "
+                            "apt-get install -y --no-install-recommends gcc build-essential && "
+                            "rm -rf /var/lib/apt/lists/*\n"
+                            "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\n"
+                        )
                     elif project_type == "node": install_step = "RUN npm install\n"
                     elif project_type == "go": install_step = "RUN go mod download\n"
                     elif project_type == "java-maven": install_step = "RUN mvn clean package -DskipTests\n"
@@ -399,7 +405,6 @@ async def callback_handler(client, query: CallbackQuery):
                     df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{safe_cmd}\n"
                     with open(dockerfile_path, "w") as df: df.write(df_content)
                 
-                # FIXED: Removed mem_limit="1g" here based on your testing
                 await asyncio.to_thread(
                     docker_client.images.build,
                     path=root, tag=image_tag, rm=True, forcerm=True
