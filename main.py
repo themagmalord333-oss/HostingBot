@@ -21,9 +21,9 @@ HOST_DIR = "hosted_containers"
 MAX_ZIP_SIZE = 50 * 1024 * 1024       
 MAX_EXTRACTED_SIZE = 200 * 1024 * 1024 
 MAX_FILES = 500                       
-MAX_ACTIONS = 7
+MAX_NODES = 7
 
-# ================= OWNER / ADMIN =================
+# Owner ID default wahi hai jo tumne diya tha
 OWNER_ID = int(os.getenv("OWNER_ID", "8629274424"))
 
 os.makedirs(HOST_DIR, exist_ok=True)
@@ -54,7 +54,7 @@ def get_user_lock(user_id):
     if user_id not in USER_LOCKS: USER_LOCKS[user_id] = asyncio.Lock()
     return USER_LOCKS[user_id]
 
-# ================= OWNER LOGIC =================
+# ================= OWNER / ADMIN HELPERS =================
 def is_owner(user_id: int) -> bool:
     return int(user_id) == OWNER_ID
 
@@ -84,15 +84,15 @@ async def heartbeat_loop():
     while True:
         try:
             nodes_col.update_one(
-                {"node_id": NODE_ID},
+                {"node_id": NODE_ID}, 
                 {"$set": {
-                    "role": "MASTER" if NODE_ID == 1 else "WORKER",
-                    "cpu": psutil.cpu_percent(interval=None),
-                    "ram": psutil.virtual_memory().percent,
-                    "disk": psutil.disk_usage('/').percent,
-                    "containers": len(docker_client.containers.list(filters={"name": "anysnap_"})),
+                    "role": "MASTER" if NODE_ID == 1 else "WORKER", 
+                    "cpu": psutil.cpu_percent(interval=None), 
+                    "ram": psutil.virtual_memory().percent, 
+                    "disk": psutil.disk_usage('/').percent, 
+                    "containers": len(docker_client.containers.list(filters={"name": "anysnap_"})), 
                     "last_seen": time.time()
-                }},
+                }}, 
                 upsert=True
             )
         except: pass
@@ -104,7 +104,7 @@ def get_best_node():
     if not active_nodes: return 1 
     best_node = active_nodes[0]
     if best_node.get("cpu", 0) > 85.0 or best_node.get("ram", 0) > 85.0:
-        for i in range(1, MAX_ACTIONS + 1):
+        for i in range(1, MAX_NODES + 1):
             if i not in active_ids: return i
         return best_node["node_id"] 
     return best_node["node_id"]
@@ -117,15 +117,15 @@ async def trigger_github_worker(target_node):
         return res.status_code == 204
     except: return False
 
-# ================= ZERO-TRUST SECURITY =================
+# ================= SECURITY (ZERO-TRUST) =================
 def validate_requirements(path):
     dangerous_prefixes = ("-i ", "--index-url", "--extra-index-url", "--trusted-host", "--find-links", "--no-index", "-f ", "--config-settings", "--global-option", "--install-option", "git+", "http://", "https://", "file://")
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith("#"): continue
-            if line.startswith(dangerous_prefixes): raise ValueError("❌ Unsafe requirements entry detected.")
-            if "://" in line: raise ValueError("❌ External URL dependencies are not allowed.")
+            if line.startswith(dangerous_prefixes): raise ValueError("❌ Unsafe requirements entry.")
+            if "://" in line: raise ValueError("❌ External URL dependencies forbidden.")
     return True
 
 def safe_extract_zip(zip_path, extract_dir):
@@ -134,14 +134,14 @@ def safe_extract_zip(zip_path, extract_dir):
     with zipfile.ZipFile(zip_path, "r") as z:
         for member in z.infolist():
             name = member.filename.replace("\\", "/")
-            if name.startswith("/") or name.startswith("../") or "/../" in name: raise ValueError("⚠️ Unsafe ZIP path detected.")
+            if name.startswith("/") or name.startswith("../") or "/../" in name: raise ValueError("⚠️ Unsafe ZIP path.")
             target = os.path.realpath(os.path.join(extract_dir, name))
             if not (target == base or target.startswith(base + os.sep)): raise ValueError("⚠️ ZIP path traversal detected.")
             if member.is_dir(): continue
             file_count += 1
             if file_count > MAX_FILES: raise ValueError("⚠️ Too many files.")
             size_extracted += member.file_size
-            if size_extracted > MAX_EXTRACTED_SIZE: raise ValueError("⚠️ Extracted size limit exceeded.")
+            if size_extracted > MAX_EXTRACTED_SIZE: raise ValueError("⚠️ Size limit exceeded.")
         z.extractall(extract_dir)
 
 def rezip_workspace(user_dir):
@@ -234,9 +234,9 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
         
     return True, container.id, image_tag
 
-# ================= WORKER =================
+# ================= WORKER NODE LOOP =================
 async def worker_node_loop():
-    print(f"👷 MAGMAxRICH WORKER NODE #{NODE_ID} ACTIVE!")
+    print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} ACTIVE!")
     while True:
         task = projects_col.find_one({"target_node": NODE_ID, "status": "queued"})
         if task:
@@ -295,27 +295,6 @@ async def worker_node_loop():
             except Exception as e: projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}, "$set": {"latest_error": str(e)}})
         await asyncio.sleep(3)
 
-# ================= OWNER PANEL UI =================
-async def owner_panel(message):
-    if not is_owner(message.from_user.id): return await message.reply_text("❌ Access Denied.")
-    auto = get_auto_approve()
-    pending = projects_col.count_documents({"status": "pending_approval"})
-    running = projects_col.count_documents({"status": "running"})
-    total = projects_col.count_documents({})
-    online_nodes = nodes_col.count_documents({"last_seen": {"$gt": time.time() - 30}})
-    
-    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 👑 OWNER CONTROL     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"🤖 **AUTO APPROVE:** {'🟢 ON' if auto else '🔴 OFF'}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"⏳ Pending Approval  `{pending}`\n🟢 Running Bots      `{running}`\n📦 Total Projects    `{total}`\n🌐 Online Nodes      `{online_nodes}`\n\n━━━━━━━━━━━━━━━━━━━━━━\n🎛 **OWNER CONTROLS**")
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Auto Approve ON", callback_data="owner_auto_on"), InlineKeyboardButton("🔴 Auto Approve OFF", callback_data="owner_auto_off")],
-        [InlineKeyboardButton("⏳ Pending", callback_data="owner_pending"), InlineKeyboardButton("🤖 Projects", callback_data="owner_projects")],
-        [InlineKeyboardButton("🌐 Nodes", callback_data="owner_nodes"), InlineKeyboardButton("📊 Statistics", callback_data="owner_stats")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="owner_panel")]
-    ])
-    if getattr(message, "edit_text", None): await message.edit_text(text, reply_markup=kb)
-    else: await message.reply_text(text, reply_markup=kb)
-
 # ================= UI & UTILS =================
 def detect_project_entry(bot_dir):
     for root, _, files in os.walk(bot_dir):
@@ -346,6 +325,68 @@ async def show_deploy_confirmation(client, user_id, chat_id, edit_msg=None):
     if edit_msg: await edit_msg.edit_text(text, reply_markup=kb)
     else: await client.send_message(chat_id, text, reply_markup=kb)
 
+# ================= OWNER PANEL UI =================
+async def owner_panel(message, edit=False):
+    if not is_owner(message.from_user.id):
+        if not edit: return await message.reply_text("❌ Access Denied.")
+        return
+    
+    auto = get_auto_approve()
+    pending = projects_col.count_documents({"status": "pending_approval"})
+    running = projects_col.count_documents({"status": "running"})
+    total = projects_col.count_documents({})
+    online_nodes = nodes_col.count_documents({"last_seen": {"$gt": time.time() - 30}})
+    
+    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
+            f"┃ 👑 OWNER CONTROL     ┃\n"
+            f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"🤖 AUTO APPROVE  {'🟢 ON' if auto else '🔴 OFF'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⏳ Pending       `{pending}`\n"
+            f"🟢 Running       `{running}`\n"
+            f"📦 Projects      `{total}`\n"
+            f"🌐 Nodes Online  `{online_nodes}`\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎛 OWNER CONTROLS")
+    
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Auto Approve ON", callback_data="owner_auto_on"), InlineKeyboardButton("🔴 Auto Approve OFF", callback_data="owner_auto_off")],
+        [InlineKeyboardButton("⏳ Pending", callback_data="owner_pending"), InlineKeyboardButton("🤖 Projects", callback_data="owner_projects")],
+        [InlineKeyboardButton("🌐 Nodes", callback_data="owner_nodes"), InlineKeyboardButton("📊 Statistics", callback_data="owner_stats")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="owner_panel")]
+    ])
+    
+    if edit: 
+        try: await message.edit_text(text, reply_markup=kb)
+        except: pass
+    else: await message.reply_text(text, reply_markup=kb)
+
+async def show_owner_pending(message):
+    if not is_owner(message.from_user.id): return
+    pending = list(projects_col.find({"status": "pending_approval"}).sort("created_at", 1))
+    
+    if not pending:
+        return await message.edit_text(
+            "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ PENDING APPROVAL  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n✅ No pending deployments.", 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]])
+        )
+        
+    text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ PENDING APPROVAL  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+    buttons = []
+    
+    for p in pending[:20]:
+        pid = str(p["_id"])
+        text += (f"📦 **{p.get('project_name', 'Unknown')}**\n"
+                 f"👤 User: `{p.get('user_id')}`\n"
+                 f"🐍 Type: `{p.get('type', 'UNKNOWN').upper()}`\n"
+                 f"🖥 Node: `#{p.get('target_node', 1)}`\n"
+                 f"━━━━━━━━━━━━━━━━━━━━━━\n")
+        buttons.append([InlineKeyboardButton("✅ Approve", callback_data=f"approve_{pid}"), InlineKeyboardButton("❌ Reject", callback_data=f"reject_{pid}")])
+    
+    buttons.append([InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")])
+    await message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+# ================= USER DASHBOARD =================
 async def render_dashboard(client, message, user_id, is_edit=False):
     proj = projects_col.find_one({"user_id": user_id})
     if not proj:
@@ -354,7 +395,7 @@ async def render_dashboard(client, message, user_id, is_edit=False):
                 "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                 "No active projects detected.\n"
                 "**Deploy:** Send `.zip` or `.py` file.\n\n"
-                "*(Powered by MAGMAxRICH)*")
+                "*(Powered by ANYSNAP)*")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Upload Project", callback_data="btn_none")]])
     else:
         status = str(proj.get("status")).upper()
@@ -373,7 +414,8 @@ async def render_dashboard(client, message, user_id, is_edit=False):
                     f"🔐 **Status:** `PENDING APPROVAL`\n\n"
                     f"Your deployment request has been submitted for review.\n\n"
                     f"⏳ Please wait...")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")]])
+            kb_layout = [[InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")]]
+            kb = InlineKeyboardMarkup(kb_layout)
         else:
             node_stats = nodes_col.find_one({"node_id": proj.get("target_node", 1)})
             cpu, ram, disk = (node_stats['cpu'], node_stats['ram'], node_stats['disk']) if node_stats else (0, 0, 0)
@@ -397,7 +439,8 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             if status == "STOPPED":
                 kb_layout.append([InlineKeyboardButton("▶️ Start Bot", callback_data="btn_start"), InlineKeyboardButton("🗑️ Delete Project", callback_data="btn_delete")])
             else:
-                kb_layout.append([InlineKeyboardButton("📜 Logs", callback_data="btn_logs"), InlineKeyboardButton("📊 Statistics", callback_data="btn_stats")])
+                # User gets ONLY Logs here, Stats are restricted to Owner
+                kb_layout.append([InlineKeyboardButton("📜 Logs", callback_data="btn_logs")])
                 kb_layout.append([InlineKeyboardButton("🔄 Restart", callback_data="btn_restart"), InlineKeyboardButton("⚙️ Settings", callback_data="btn_settings")])
                 kb_layout.append([InlineKeyboardButton("⏹ Stop", callback_data="btn_stop")])
             kb_layout.append([InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")])
@@ -408,13 +451,14 @@ async def render_dashboard(client, message, user_id, is_edit=False):
         else: await message.reply_text(text, reply_markup=kb)
     except: pass
 
-# ================= HANDLERS =================
+# ================= MESSAGE HANDLERS =================
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     await render_dashboard(client, message, message.from_user.id, is_edit=False)
 
 @app.on_message(filters.command("owner"))
 async def owner_cmd(client, message):
+    if not is_owner(message.from_user.id): return await message.reply_text("❌ Access Denied.")
     await owner_panel(message)
 
 @app.on_message(filters.document & filters.private)
@@ -485,49 +529,94 @@ async def text_handler(client, message):
         del ENV_WAITING[user_id]
         await message.reply_text(f"✅ Added ENV: `{key}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Settings", callback_data="btn_settings")]]))
 
+# ================= CALLBACK HANDLERS =================
 @app.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
     
+    # ================= OWNER SECURITY CHECK =================
     owner_actions = data.startswith("owner_") or data.startswith("approve_") or data.startswith("reject_") or data.startswith("admin_")
-    if owner_actions and not is_owner(user_id): return await query.answer("❌ Owner Only!", show_alert=True)
+    if owner_actions and not is_owner(user_id):
+        return await query.answer("❌ Owner Only!", show_alert=True)
     
-    if data == "owner_auto_on": set_auto_approve(True); await query.answer("🟢 Auto Approve Enabled", show_alert=True); return await owner_panel(query.message)
-    elif data == "owner_auto_off": set_auto_approve(False); await query.answer("🔴 Auto Approve Disabled", show_alert=True); return await owner_panel(query.message)
-    elif data == "owner_panel": return await owner_panel(query.message)
-    elif data == "owner_pending":
-        pending = list(projects_col.find({"status": "pending_approval"}).sort("created_at", 1))
-        if not pending: return await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ PENDING APPROVAL  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n✅ No pending deployments.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]]))
-        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ PENDING APPROVAL  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        buttons = []
-        for p in pending[:20]:
-            pid = str(p["_id"])
-            text += f"📦 **{p.get('project_name', 'Unknown')}**\n👤 User: `{p.get('user_id')}`\n🐍 Type: `{p.get('type', 'unknown').upper()}`\n🖥 Node: `#{p.get('target_node', 1)}`\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            buttons.append([InlineKeyboardButton(f"✅ {p.get('project_name', 'Project')[:15]}", callback_data=f"approve_{pid}"), InlineKeyboardButton("❌ Reject", callback_data=f"reject_{pid}")])
-        buttons.append([InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")])
-        return await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    # ================= OWNER CONTROLS =================
+    if data == "owner_auto_on": 
+        set_auto_approve(True)
+        await query.answer("🟢 Auto Approve ON", show_alert=True)
+        return await owner_panel(query.message, edit=True)
+        
+    elif data == "owner_auto_off": 
+        set_auto_approve(False)
+        await query.answer("🔴 Auto Approve OFF", show_alert=True)
+        return await owner_panel(query.message, edit=True)
+        
+    elif data == "owner_panel": 
+        return await owner_panel(query.message, edit=True)
+        
+    elif data == "owner_pending": 
+        return await show_owner_pending(query.message)
+        
+    elif data == "owner_stats":
+        all_nodes = list(nodes_col.find().sort("node_id", 1))
+        total_cpu, total_ram, online = 0, 0, 0
+        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 📊 CLUSTER STATISTICS ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        for n in all_nodes:
+            alive = (time.time() - n.get("last_seen", 0)) < 30
+            if alive: online += 1
+            cpu, ram = n.get("cpu", 0), n.get("ram", 0)
+            total_cpu += cpu
+            total_ram += ram
+            text += f"{'🟢' if alive else '🔴'} **NODE #{n.get('node_id')}**\nRole: `{n.get('role', 'UNKNOWN')}`\nCPU: `{cpu:.1f}%`\nRAM: `{ram:.1f}%`\nBots: `{n.get('containers', 0)}`\n\n"
+        
+        count = len(all_nodes) or 1
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n🌐 Online Nodes: `{online}/{len(all_nodes)}`\n⚡ Avg CPU: `{total_cpu/count:.1f}%`\n💾 Avg RAM: `{total_ram/count:.1f}%`"
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]]))
+
+    elif data == "owner_projects":
+        projects = list(projects_col.find().sort("created_at", -1).limit(20))
+        if not projects: return await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🤖 ALL PROJECTS      ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\nNo projects found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]]))
+        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🤖 ALL PROJECTS      ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        for p in projects:
+            status = p.get("status", "unknown").upper()
+            text += f"📦 **{p.get('project_name', 'Unknown')}**\n👤 `{p.get('user_id')}`\n📌 `{status}`\n🖥 Node `{p.get('target_node', 1)}`\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        await query.message.edit_text(text[:4096], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]]))
+
+    elif data == "owner_nodes":
+        nodes = list(nodes_col.find().sort("node_id", 1))
+        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🌐 NODE CONTROL      ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        for n in nodes:
+            alive = (time.time() - n.get("last_seen", 0)) < 30
+            text += f"{'🟢' if alive else '🔴'} **NODE #{n.get('node_id')}**\nRole: `{n.get('role', 'UNKNOWN')}`\nCPU: `{n.get('cpu', 0):.1f}%`\nRAM: `{n.get('ram', 0):.1f}%`\nDisk: `{n.get('disk', 0):.1f}%`\nBots: `{n.get('containers', 0)}`\n\n"
+        await query.message.edit_text(text[:4096], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Owner Panel", callback_data="owner_panel")]]))
     
+    # ================= APPROVAL LOGIC =================
     elif data.startswith("approve_"):
         project_id = data.replace("approve_", "", 1)
         try: oid = ObjectId(project_id)
         except: return await query.answer("Invalid project.", show_alert=True)
+        
         proj = projects_col.find_one({"_id": oid, "status": "pending_approval"})
         if not proj: return await query.answer("Project no longer pending.", show_alert=True)
         
         projects_col.update_one({"_id": oid}, {"$set": {"status": "queued", "approved_by": OWNER_ID, "approved_at": time.time()}})
         target_node = proj.get("target_node", 1)
+        
         if target_node == NODE_ID:
             try:
                 work_dir = os.path.join(HOST_DIR, str(proj["user_id"]))
                 os.makedirs(work_dir, exist_ok=True)
                 zip_path, extract_dir = os.path.join(work_dir, "project.zip"), os.path.join(work_dir, "extracted")
                 os.makedirs(extract_dir, exist_ok=True)
+                
                 with open(zip_path, "wb") as f: f.write(fs.get(proj["file_id"]).read())
                 safe_extract_zip(zip_path, extract_dir)
+                
                 success, cid, img_tag = await deploy_docker_container(oid, proj["user_id"], extract_dir, proj["type"], proj["entry"], proj.get("env_vars", {}))
+                
                 if success: projects_col.update_one({"_id": oid}, {"$set": {"status": "running", "container_id": cid, "image_tag": img_tag, "started_at": time.time()}, "$unset": {"latest_error": ""}})
                 else: projects_col.update_one({"_id": oid}, {"$set": {"status": "crashed", "latest_error": cid}})
+                
                 try: fs.delete(proj["file_id"])
                 except: pass
                 cleanup_workspace(proj["user_id"])
@@ -538,23 +627,29 @@ async def callback_handler(client, query: CallbackQuery):
         
         try: await app.send_message(proj["user_id"], f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ✅ DEPLOYMENT APPROVED┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{proj.get('project_name', 'Project')}`\n\n🚀 Your project has been approved and deployment has started.")
         except: pass
+        
         await query.answer("✅ Project Approved", show_alert=True)
-        return await callback_handler(client, CallbackQuery(id=query.id, from_user=query.from_user, message=query.message, data="owner_pending", chat_instance=query.chat_instance))
+        return await show_owner_pending(query.message)
 
     elif data.startswith("reject_"):
         project_id = data.replace("reject_", "", 1)
         try: oid = ObjectId(project_id)
         except: return await query.answer("Invalid project.", show_alert=True)
+        
         proj = projects_col.find_one({"_id": oid, "status": "pending_approval"})
         if not proj: return await query.answer("Project already processed.", show_alert=True)
+        
         projects_col.update_one({"_id": oid}, {"$set": {"status": "rejected", "rejected_by": OWNER_ID, "rejected_at": time.time()}})
         try: fs.delete(proj["file_id"])
         except: pass
+        
         try: await app.send_message(proj["user_id"], f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ❌ DEPLOYMENT REJECTED┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{proj.get('project_name', 'Project')}`\n\nYour deployment request was not approved.")
         except: pass
+        
         await query.answer("❌ Project Rejected", show_alert=True)
-        return await callback_handler(client, CallbackQuery(id=query.id, from_user=query.from_user, message=query.message, data="owner_pending", chat_instance=query.chat_instance))
+        return await show_owner_pending(query.message)
 
+    # ================= USER CONTROLS =================
     elif data == "btn_refresh_dash": await render_dashboard(client, query.message, user_id, is_edit=True)
     elif data == "btn_skip_req":
         if user_id in REQ_WAITING: del REQ_WAITING[user_id]
@@ -569,9 +664,11 @@ async def callback_handler(client, query: CallbackQuery):
     elif data == "btn_deploy_confirm":
         state = USER_STATE.get(user_id)
         if not state: return await query.answer("Session expired.", show_alert=True)
+        
         prog_msg = await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🚀 DEPLOYMENT        ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n⏳ Preparing deployment...")
         target_node = get_best_node()
         with open(state["zip_path"], "rb") as f: file_id = fs.put(f, filename=f"user_{user_id}.zip")
+        
         auto_approve = get_auto_approve()
         initial_status = "queued" if auto_approve else "pending_approval"
         
@@ -581,8 +678,11 @@ async def callback_handler(client, query: CallbackQuery):
         
         if not auto_approve:
             await prog_msg.edit_text(f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ AWAITING APPROVAL ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{state['project_name']}`\n🐍 `{state['type'].upper()}`\n\n🔐 Your deployment request has been sent for approval.\n\n⏳ Please wait for approval.")
-            try: await app.send_message(OWNER_ID, f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔔 DEPLOYMENT REQUEST┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 **{state['project_name']}**\n👤 User: `{user_id}`\n🐍 Type: `{state['type'].upper()}`\n📄 Entry: `{state['entry']}`\n🖥 Target Node: `#{target_node}`\n\n⚠️ **Approval Required**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]]))
-            except Exception as e: projects_col.update_one({"_id": project_id}, {"$set": {"latest_error": f"Owner notification failed: {e}"}})
+            try: 
+                await app.send_message(OWNER_ID, f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔔 DEPLOYMENT REQUEST┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 **{state['project_name']}**\n👤 User: `{user_id}`\n🐍 Type: `{state['type'].upper()}`\n📄 Entry: `{state['entry']}`\n🖥 Target Node: `#{target_node}`\n\n⚠️ **Approval Required**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]]))
+            except Exception as e: 
+                projects_col.update_one({"_id": project_id}, {"$set": {"latest_error": f"Owner notification failed: {e}"}})
+            
             USER_STATE.pop(user_id, None); cleanup_workspace(user_id)
             return
 
@@ -594,10 +694,13 @@ async def callback_handler(client, query: CallbackQuery):
                 try: fs.delete(file_id)
                 except: pass
                 await render_dashboard(client, prog_msg, user_id, is_edit=True)
-            except Exception as e: projects_col.update_one({"_id": project_id}, {"$set": {"status": "error", "latest_error": str(e)}}); await prog_msg.edit_text("❌ Deployment failed.")
+            except Exception as e: 
+                projects_col.update_one({"_id": project_id}, {"$set": {"status": "error", "latest_error": str(e)}})
+                await prog_msg.edit_text("❌ Deployment failed.")
         else: 
             await trigger_github_worker(target_node)
             await prog_msg.edit_text(f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🚀 DEPLOYMENT        ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n✅ Node Selected: `#{target_node}`\n⏳ Worker Booting...\n\n🔄 Refresh dashboard to track.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")]]))
+        
         USER_STATE.pop(user_id, None); cleanup_workspace(user_id)
         return
 
@@ -625,7 +728,6 @@ async def callback_handler(client, query: CallbackQuery):
         proj = projects_col.find_one({"user_id": user_id})
         active_env = proj.get("env_vars", {}) if proj else {}
         env_text = "\n".join([f"• `{k}`" for k in active_env.keys()]) if active_env else "None"
-        
         text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚙️ PROJECT SETTINGS  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                 f"🔐 **ENVIRONMENT**\n━━━━━━━━━━━━━━━━━━━━━━\n{env_text}\n\n"
                 f"💾 **RESOURCES**\n├─ RAM       `512 MB`\n├─ CPU       `1 Core`\n└─ Processes `128`\n\n"
@@ -655,15 +757,6 @@ async def callback_handler(client, query: CallbackQuery):
             p = projects_col.find_one({"_id": proj["_id"]})
             await query.message.edit_text(f"📜 **LOGS (Node {proj['target_node']}):**\n```\n{p.get('latest_logs', 'Fetching...')} \n```", reply_markup=kb)
 
-    elif data == "btn_stats":
-        all_nodes = list(nodes_col.find().sort("node_id", 1))
-        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🌐 CLOUD CLUSTER     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        for n in all_nodes:
-            status = "🟢" if time.time() - n.get("last_seen", 0) < 30 else "🔴"
-            text += f"{status} **NODE #{n['node_id']}**\n{n.get('role', 'UNKNOWN')}\n⚡ CPU  `{get_progress_bar(n.get('cpu', 0))}` {n.get('cpu', 0)}%\n💾 RAM  `{get_progress_bar(n.get('ram', 0))}` {n.get('ram', 0)}%\n🤖 Bots: `{n.get('containers', 0)}`\n\n"
-        text += f"━━━━━━━━━━━━━━━━━━━━━━\n🟢 {len([n for n in all_nodes if time.time() - n.get('last_seen', 0) < 30])} Nodes Online"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]]))
-
     elif data == "btn_stop":
         proj = projects_col.find_one({"user_id": user_id})
         if proj["target_node"] == NODE_ID:
@@ -692,11 +785,14 @@ async def callback_handler(client, query: CallbackQuery):
         else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "delete"}})
         await query.message.edit_text("🗑️ Project Deleted & Resources Wiped.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Return Home", callback_data="btn_refresh_dash")]]))
 
-# ================= RUNNER =================
+# ================= RUNNERS =================
 async def main_node():
-    asyncio.create_task(heartbeat_loop()); await app.start(); print("👑 ANYSNAP MASTER NODE STARTED"); await idle(); await app.stop()
-async def worker_main(): asyncio.create_task(heartbeat_loop()); await worker_node_loop()
+    asyncio.create_task(heartbeat_loop())
+    await app.start()
+    print("👑 ANYSNAP CLOUD MASTER NODE STARTED")
+    await idle()
+    await app.stop()
 
 if __name__ == "__main__":
     if NODE_ID == 1: asyncio.run(main_node())
-    else: asyncio.run(worker_main())
+    else: asyncio.run(worker_node_loop())
