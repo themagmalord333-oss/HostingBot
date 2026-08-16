@@ -1,43 +1,17 @@
-name: Anysnap PaaS Master/Worker Runner
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      node_id:
-        description: 'Node ID for Worker (1 is Master)'
-        required: true
-        default: '1'
-
-jobs:
-  run-bot:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
-      - name: Install Requirements
-        run: pip install pyrogram tgcrypto docker psutil requests pymongo python-dotenv
-
-      - name: Start Docker Daemon
-        run: |
-          sudo systemctl start docker
-          sudo systemctl enable docker
-          sudo usermod -aG docker $USER
-
-      - name: Run Node
+- name: Run Node
         env:
-          NODE_ID: ${{ github.event.inputs.node_id || '1' }}
-          MONGO_URI: ${{ secrets.MONGO_URI }} 
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
           GH_PERSONAL_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
-          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
-        run: python main.py
+          GITHUB_REPO: ${{ secrets.REPO_NAME }}
+          WORKFLOW_FILE: ${{ secrets.WORKFLOW_FILE }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          NODE_ID: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          echo "======================================"
+          echo "🚀 ANYSNAP CLOUD STARTING"
+          echo "======================================"
+          python -u main.py
