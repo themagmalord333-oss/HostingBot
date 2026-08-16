@@ -396,7 +396,9 @@ async def callback_handler(client, query: CallbackQuery):
                             "RUN apt-get update && "
                             "apt-get install -y --no-install-recommends gcc build-essential && "
                             "rm -rf /var/lib/apt/lists/*\n"
-                            "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\n"
+                            "RUN if [ -f requirements.txt ]; then "
+                            "pip install --no-cache-dir -r requirements.txt; "
+                            "else echo '⚠️ WARNING: requirements.txt not found, skipping dependencies.'; fi\n"
                         )
                     elif project_type == "node": install_step = "RUN npm install\n"
                     elif project_type == "go": install_step = "RUN go mod download\n"
@@ -426,7 +428,6 @@ async def callback_handler(client, query: CallbackQuery):
                 if not is_stable:
                     logs = (await asyncio.to_thread(container.logs, tail=20)).decode("utf-8", errors="ignore")
                     
-                    # Ghost container / Image leak prevention on crash
                     try: await asyncio.to_thread(container.remove, force=True)
                     except: pass
                     try: await asyncio.to_thread(docker_client.images.remove, image=image_tag, force=True)
@@ -446,7 +447,6 @@ async def callback_handler(client, query: CallbackQuery):
                 RUNNING_CONTAINERS[user_id] = {"container_id": container.id}
                 save_project(user_id, container.id, project_type, root, "running")
                 
-                # Auto-prune old deployments for this user
                 await cleanup_old_user_images(user_id, current_tag=image_tag)
                 
                 await query.message.edit_text(
@@ -477,7 +477,6 @@ async def callback_handler(client, query: CallbackQuery):
                 )
                 
             except Exception as e:
-                # Ghost container / Image leak prevention on generic exception
                 if container is not None:
                     try: await asyncio.to_thread(container.remove, force=True)
                     except: pass
