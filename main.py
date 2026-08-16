@@ -399,9 +399,10 @@ async def callback_handler(client, query: CallbackQuery):
                     df_content = f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{safe_cmd}\n"
                     with open(dockerfile_path, "w") as df: df.write(df_content)
                 
+                # FIXED: Removed mem_limit="1g" here based on your testing
                 await asyncio.to_thread(
                     docker_client.images.build,
-                    path=root, tag=image_tag, rm=True, mem_limit="1g", forcerm=True
+                    path=root, tag=image_tag, rm=True, forcerm=True
                 )
                 
                 container = await asyncio.to_thread(
