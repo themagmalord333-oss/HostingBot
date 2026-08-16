@@ -1,3 +1,35 @@
+name: Anysnap Cloud Runner
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      node_id:
+        description: 'Node ID for Worker (1 is Master)'
+        required: true
+        default: '1'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Requirements
+        run: pip install pyrogram tgcrypto docker psutil requests pymongo python-dotenv
+
+      - name: Start Docker Daemon
+        run: |
+          sudo systemctl start docker
+          sudo systemctl enable docker
+
       - name: Run Node
         env:
           API_ID: ${{ secrets.API_ID }}
