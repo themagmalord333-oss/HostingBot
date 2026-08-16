@@ -223,6 +223,43 @@ async def start_cmd(client, message):
     if user_id not in USER_STATE: USER_STATE[user_id] = {}
     await message.reply_text("<b>🐳 ANYSNAP CLOUD PAAS</b>\n\nScale up to 7 Servers Auto-Magically! Send your `.zip` file.", reply_markup=get_main_keyboard(user_id))
 
+@app.on_message(filters.command("stats"))
+async def stats_cmd(client, message):
+    status_msg = await message.reply_text("📊 Fetching Cloud Stats...")
+    
+    # 1. RAM & CPU Check
+    ram = psutil.virtual_memory()
+    total_ram_gb = ram.total / (1024 ** 3)
+    free_ram_gb = ram.available / (1024 ** 3)
+    used_ram_gb = total_ram_gb - free_ram_gb
+    cpu_usage = psutil.cpu_percent(interval=1)
+    
+    # 2. Local Docker Containers (Master Node par kitne bot chal rahe hain)
+    try:
+        local_containers = len(docker_client.containers.list())
+    except:
+        local_containers = 0
+        
+    # 3. Global MongoDB Cluster Check (Total paas system me kitne hain)
+    total_bots = projects_col.count_documents({"status": "running"})
+    cluster = db.cluster.find_one({"_id": "status"})
+    active_nodes = cluster["active_nodes"] if cluster else 1
+    
+    stats_text = (
+        "📈 **ANYSNAP CLOUD DASHBOARD**\n\n"
+        "💻 **Master Node (Node 1) Resources:**\n"
+        f"┣ **CPU Usage:** `{cpu_usage}%`\n"
+        f"┣ **RAM Usage:** `{used_ram_gb:.2f} GB / {total_ram_gb:.2f} GB` ({ram.percent}%)\n"
+        f"┗ **Free RAM:** `{free_ram_gb:.2f} GB`\n\n"
+        "🌐 **Cluster & Bot Status:**\n"
+        f"┣ **Total Running Bots:** `{total_bots}`\n"
+        f"┣ **Local Containers:** `{local_containers}`\n"
+        f"┗ **Active GitHub Nodes:** `{active_nodes} / {MAX_ACTIONS}`\n\n"
+        "<i>- Powered by Anysnap</i>"
+    )
+    
+    await status_msg.edit_text(stats_text)
+
 @app.on_message(filters.document & filters.private)
 async def handle_zip_upload(client, message):
     user_id = message.from_user.id
