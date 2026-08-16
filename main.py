@@ -242,67 +242,6 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
 
     return True, container.id, image_tag
 
-# ================= WORKER NODE LOOP =================
-async def worker_node_loop():
-    print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} ACTIVE!")
-    while True:
-        task = projects_col.find_one({"target_node": NODE_ID, "status": "queued"})
-        if task:
-            try:
-                work_dir = os.path.join(HOST_DIR, str(task["user_id"]))
-                os.makedirs(work_dir, exist_ok=True)
-                zip_path, extract_dir = os.path.join(work_dir, "project.zip"), os.path.join(work_dir, "extracted")
-
-                with open(zip_path, "wb") as f: f.write(fs.get(task["file_id"]).read())
-                safe_extract_zip(zip_path, extract_dir)
-
-                success, cid, img_tag = await deploy_docker_container(task["_id"], task["user_id"], extract_dir, task["type"], task["entry"], task.get("env_vars", {}))
-
-                if success: projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "running", "container_id": cid, "image_tag": img_tag, "started_at": time.time()}, "$unset": {"latest_error": ""}})
-                else: projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "crashed", "latest_error": cid}})
-                try: fs.delete(task["file_id"]) 
-                except: pass
-            except Exception as e: projects_col.update_one({"_id": task["_id"]}, {"$set": {"status": "error", "latest_error": str(e)}})
-            finally: cleanup_workspace(task["user_id"])
-
-        cmd_task = projects_col.find_one({"target_node": NODE_ID, "action": {"$exists": True}})
-        if cmd_task:
-            action = cmd_task["action"]
-            try:
-                if action == "apply_env":
-                    old_c = docker_client.containers.get(cmd_task["container_id"])
-                    old_c.stop(); old_c.remove(force=True)
-                    new_c = docker_client.containers.run(
-                        cmd_task["image_tag"], name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, 
-                        mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge",
-                        tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"},
-                        environment=cmd_task["env_vars"], restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}
-                    )
-                    projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}, "$set": {"status": "running", "container_id": new_c.id, "started_at": time.time()}})
-                elif action == "restart":
-                    docker_client.containers.get(cmd_task["container_id"]).restart()
-                    projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}, "$set": {"status": "running", "started_at": time.time()}})
-                elif action == "stop":
-                    c = docker_client.containers.get(cmd_task["container_id"]); c.stop(); c.remove(force=True)
-                    projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": "", "container_id": ""}, "$set": {"status": "stopped"}})
-                elif action == "start":
-                    new_c = docker_client.containers.run(
-                        cmd_task["image_tag"], name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, 
-                        mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge",
-                        tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"},
-                        environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}
-                    )
-                    projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}, "$set": {"status": "running", "container_id": new_c.id, "started_at": time.time()}})
-                elif action == "delete":
-                    try: c = docker_client.containers.get(cmd_task["container_id"]); c.stop(); c.remove(force=True)
-                    except: pass
-                    projects_col.delete_one({"_id": cmd_task["_id"]})
-                elif action == "get_logs":
-                    logs = docker_client.containers.get(cmd_task["container_id"]).logs(tail=50).decode("utf-8", errors="ignore")
-                    projects_col.update_one({"_id": cmd_task["_id"]}, {"$set": {"latest_logs": logs}, "$unset": {"action": ""}})
-            except Exception as e: projects_col.update_one({"_id": cmd_task["_id"]}, {"$unset": {"action": ""}, "$set": {"latest_error": str(e)}})
-        await asyncio.sleep(3)
-
 # ================= UI & UTILS =================
 def detect_project_entry(bot_dir):
     for root, _, files in os.walk(bot_dir):
@@ -322,7 +261,7 @@ async def show_deploy_confirmation(client, user_id, chat_id, edit_msg=None):
     if not state: return
     text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🚀 DEPLOYMENT        ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
             f"📦 `{state['project_name']}`\n"
-            f"🐍 `{state['type'].upper()} • {state['entry']}`\n"
+            f"🐍 `{str(state.get('type', 'Unknown')).upper()} • {state.get('entry', 'Unknown')}`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ Project Verified\n"
             f"✅ Security Scan Passed\n"
@@ -386,7 +325,7 @@ async def show_owner_pending(message):
         pid = str(p["_id"])
         text += (f"📦 **{p.get('project_name', 'Unknown')}**\n"
                  f"👤 User: `{p.get('user_id')}`\n"
-                 f"🐍 Type: `{p.get('type', 'UNKNOWN').upper()}`\n"
+                 f"🐍 Type: `{str(p.get('type', 'UNKNOWN')).upper()}`\n"
                  f"🖥 Node: `#{p.get('target_node', 1)}`\n"
                  f"━━━━━━━━━━━━━━━━━━━━━━\n")
         buttons.append([InlineKeyboardButton("✅ Approve", callback_data=f"approve_{pid}"), InlineKeyboardButton("❌ Reject", callback_data=f"reject_{pid}")])
@@ -406,7 +345,7 @@ async def render_dashboard(client, message, user_id, is_edit=False):
                 "*(Powered by ANYSNAP)*")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📤 Upload Project", callback_data="btn_none")]])
     else:
-        status = str(proj.get("status")).upper()
+        status = str(proj.get("status", "UNKNOWN")).upper()
 
         if status == "RUNNING": emoji = "🟢"
         elif status in ["STOPPED", "QUEUED", "BUILDING", "STARTING"]: emoji = "🟡"
@@ -418,7 +357,7 @@ async def render_dashboard(client, message, user_id, is_edit=False):
                     f"┃ ⏳ DEPLOYMENT REVIEW ┃\n"
                     f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                     f"📦 `{proj.get('project_name', 'Project')}`\n"
-                    f"🐍 `{str(proj.get('type')).upper()}`\n\n"
+                    f"🐍 `{str(proj.get('type', 'Unknown')).upper()}`\n\n"
                     f"🔐 **Status:** `PENDING APPROVAL`\n\n"
                     f"Your deployment request has been submitted for review.\n\n"
                     f"⏳ Please wait...")
@@ -426,14 +365,14 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             kb = InlineKeyboardMarkup(kb_layout)
         else:
             node_stats = nodes_col.find_one({"node_id": proj.get("target_node", 1)})
-            cpu, ram, disk = (node_stats['cpu'], node_stats['ram'], node_stats['disk']) if node_stats else (0, 0, 0)
+            cpu, ram, disk = (node_stats['cpu'], node_stats['ram'], node_stats['disk']) if node_stats else (0.0, 0.0, 0.0)
             text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
                     f"┃  🐳 ANYSNAP CLOUD    ┃\n"
                     f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
                     f"{emoji}  **{status}**\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🤖  `{proj.get('project_name', 'Anysnap App')}`\n"
-                    f"🐍  `{str(proj.get('type')).upper()} • {proj.get('entry', 'main.py')}`\n\n"
+                    f"🐍  `{str(proj.get('type', 'UNKNOWN')).upper()} • {proj.get('entry', 'main.py')}`\n\n"
                     f"🖥️  NODE\n"
                     f"└─ #{proj.get('target_node', 1)} {'MASTER' if proj.get('target_node', 1) == 1 else 'WORKER'}\n\n"
                     f"⚡ CPU     `{get_progress_bar(cpu)}` {cpu}%\n"
@@ -444,12 +383,19 @@ async def render_dashboard(client, message, user_id, is_edit=False):
                     f"      🎛 CONTROLS")
 
             kb_layout = []
+            
+            # 🛡️ Safely render buttons based on crash status
             if status == "STOPPED":
                 kb_layout.append([InlineKeyboardButton("▶️ Start Bot", callback_data="btn_start"), InlineKeyboardButton("🗑️ Delete Project", callback_data="btn_delete")])
+            elif status in ["CRASHED", "ERROR"]:
+                # Cannot restart/stop a crashed bot properly, so show Error Logs & Delete button
+                kb_layout.append([InlineKeyboardButton("📜 Error Logs", callback_data="btn_logs"), InlineKeyboardButton("⚙️ Settings", callback_data="btn_settings")])
+                kb_layout.append([InlineKeyboardButton("🗑️ Delete & Re-deploy", callback_data="btn_delete")])
             else:
                 kb_layout.append([InlineKeyboardButton("📜 Logs", callback_data="btn_logs")])
                 kb_layout.append([InlineKeyboardButton("🔄 Restart", callback_data="btn_restart"), InlineKeyboardButton("⚙️ Settings", callback_data="btn_settings")])
-                kb_layout.append([InlineKeyboardButton("⏹ Stop", callback_data="btn_stop")])
+                kb_layout.append([InlineKeyboardButton("⏹ Stop", callback_data="btn_stop"), InlineKeyboardButton("🗑️ Delete", callback_data="btn_delete")])
+            
             kb_layout.append([InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")])
             kb = InlineKeyboardMarkup(kb_layout)
 
@@ -463,6 +409,25 @@ async def render_dashboard(client, message, user_id, is_edit=False):
 async def start_cmd(client, message):
     print(f"📥 MESSAGE RECEIVED: /start from user {message.from_user.id}")
     await render_dashboard(client, message, message.from_user.id, is_edit=False)
+
+@app.on_message(filters.command("stats"))
+async def stats_cmd(client, message):
+    total_bots = projects_col.count_documents({"status": "running"})
+    cpu = psutil.cpu_percent(interval=1)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    
+    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
+            f"┃ 📊 CLUSTER STATISTICS ┃\n"
+            f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"🖥️ **Master Node (Node 1)**\n"
+            f"⚡ CPU: `{cpu}%`\n"
+            f"💾 RAM: `{ram.percent}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n"
+            f"💿 DISK: `{disk.percent}%`\n\n"
+            f"🤖 **Global Status**\n"
+            f"🟢 Running Bots: `{total_bots}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━")
+    await message.reply_text(text)
 
 @app.on_message(filters.command("owner"))
 async def owner_cmd(client, message):
@@ -603,7 +568,7 @@ async def callback_handler(client, query: CallbackQuery):
                 os.makedirs(extract_dir, exist_ok=True)
                 with open(zip_path, "wb") as f: f.write(fs.get(proj["file_id"]).read())
                 safe_extract_zip(zip_path, extract_dir)
-                success, cid, img_tag = await deploy_docker_container(oid, proj["user_id"], extract_dir, proj["type"], proj["entry"], proj.get("env_vars", {}))
+                success, cid, img_tag = await deploy_docker_container(oid, proj["user_id"], extract_dir, proj["type"], proj.get("entry", ""), proj.get("env_vars", {}))
                 if success: projects_col.update_one({"_id": oid}, {"$set": {"status": "running", "container_id": cid, "image_tag": img_tag, "started_at": time.time()}, "$unset": {"latest_error": ""}})
                 else: projects_col.update_one({"_id": oid}, {"$set": {"status": "crashed", "latest_error": cid}})
                 try: fs.delete(proj["file_id"])
@@ -648,19 +613,19 @@ async def callback_handler(client, query: CallbackQuery):
         with open(state["zip_path"], "rb") as f: file_id = fs.put(f, filename=f"user_{user_id}.zip")
         auto_approve = get_auto_approve()
         initial_status = "queued" if auto_approve else "pending_approval"
-        db_doc = {"user_id": user_id, "target_node": target_node, "status": initial_status, "type": state["type"], "entry": state["entry"], "file_id": file_id, "env_vars": state.get("env_vars", {}), "project_name": state["project_name"], "created_at": time.time()}
+        db_doc = {"user_id": user_id, "target_node": target_node, "status": initial_status, "type": state.get("type", "python"), "entry": state.get("entry", "main.py"), "file_id": file_id, "env_vars": state.get("env_vars", {}), "project_name": state.get("project_name", "Anysnap App"), "created_at": time.time()}
         result = projects_col.insert_one(db_doc)
         project_id = result.inserted_id
 
         if not auto_approve:
-            await prog_msg.edit_text(f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ AWAITING APPROVAL ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{state['project_name']}`\n🐍 `{state['type'].upper()}`\n\n🔐 Your deployment request has been sent for approval.\n\n⏳ Please wait for approval.")
-            try: await app.send_message(OWNER_ID, f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔔 DEPLOYMENT REQUEST┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 **{state['project_name']}**\n👤 User: `{user_id}`\n🐍 Type: `{state['type'].upper()}`\n📄 Entry: `{state['entry']}`\n🖥 Target Node: `#{target_node}`\n\n⚠️ **Approval Required**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]]))
+            await prog_msg.edit_text(f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ AWAITING APPROVAL ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{state.get('project_name', 'App')}`\n🐍 `{str(state.get('type')).upper()}`\n\n🔐 Your deployment request has been sent for approval.\n\n⏳ Please wait for approval.")
+            try: await app.send_message(OWNER_ID, f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔔 DEPLOYMENT REQUEST┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 **{state.get('project_name', 'App')}**\n👤 User: `{user_id}`\n🐍 Type: `{str(state.get('type')).upper()}`\n📄 Entry: `{state.get('entry', 'main.py')}`\n🖥 Target Node: `#{target_node}`\n\n⚠️ **Approval Required**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]]))
             except Exception as e: projects_col.update_one({"_id": project_id}, {"$set": {"latest_error": f"Owner notification failed: {e}"}})
             USER_STATE.pop(user_id, None); cleanup_workspace(user_id); return
 
         if target_node == NODE_ID: 
             try:
-                success, cid, img_tag = await deploy_docker_container(project_id, user_id, state["root"], state["type"], state["entry"], state.get("env_vars", {}))
+                success, cid, img_tag = await deploy_docker_container(project_id, user_id, state["root"], state.get("type", "python"), state.get("entry", "main.py"), state.get("env_vars", {}))
                 if success: projects_col.update_one({"_id": project_id}, {"$set": {"status": "running", "container_id": cid, "image_tag": img_tag, "started_at": time.time()}})
                 else: projects_col.update_one({"_id": project_id}, {"$set": {"status": "crashed", "latest_error": cid}})
                 try: fs.delete(file_id)
@@ -677,21 +642,49 @@ async def callback_handler(client, query: CallbackQuery):
     elif data == "btn_restart":
         proj = projects_col.find_one({"user_id": user_id})
         if not proj: return await query.answer("No active bot!", show_alert=True)
+        if proj.get("status") in ["crashed", "error"]:
+            return await query.answer("Bot is CRASHED! Cannot restart without a container. Please click 'Delete & Re-deploy'.", show_alert=True)
+            
+        cid = proj.get("container_id")
+        if not cid: return await query.answer("Error: Container ID missing!", show_alert=True)
+
         if proj["target_node"] == NODE_ID:
-            try: docker_client.containers.get(proj["container_id"]).restart(); projects_col.update_one({"_id": proj["_id"]}, {"$set": {"started_at": time.time()}}); await query.answer("✅ Restarted!")
-            except Exception as e: await query.answer(f"Error: {e}", show_alert=True)
-        else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "restart"}}); await query.answer("🔄 Restart signal sent...")
+            try: 
+                docker_client.containers.get(cid).restart()
+                projects_col.update_one({"_id": proj["_id"]}, {"$set": {"started_at": time.time()}})
+                await query.answer("✅ Restarted!")
+            except Exception as e: 
+                await query.answer(f"Error: {e}", show_alert=True)
+        else: 
+            projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "restart"}})
+            await query.answer("🔄 Restart signal sent...")
 
     elif data == "btn_apply_env":
         proj = projects_col.find_one({"user_id": user_id})
+        if not proj: return await query.answer("No active bot!", show_alert=True)
+        
+        image_tag = proj.get("image_tag")
+        if not image_tag:
+            return await query.answer("Cannot Apply ENV: Bot Image was never built due to crash! Please Delete and re-upload.", show_alert=True)
+
         if proj["target_node"] == NODE_ID:
             try:
-                old_c = docker_client.containers.get(proj["container_id"]); old_c.stop(); old_c.remove(force=True)
-                new_c = docker_client.containers.run(proj["image_tag"], name=f"anysnap_bot_{user_id}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                cid = proj.get("container_id")
+                if cid:
+                    old_c = docker_client.containers.get(cid)
+                    old_c.stop()
+                    old_c.remove(force=True)
+            except: pass
+            
+            try:
+                new_c = docker_client.containers.run(image_tag, name=f"anysnap_bot_{user_id}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 projects_col.update_one({"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "running", "started_at": time.time()}})
                 await render_dashboard(client, query.message, user_id, is_edit=True)
-            except Exception as e: await query.answer(f"Error: {e}", show_alert=True)
-        else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "apply_env"}}); await query.answer("🔄 Apply signal sent to Worker...")
+            except Exception as e: 
+                await query.answer(f"Error: {e}", show_alert=True)
+        else: 
+            projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "apply_env"}})
+            await query.answer("🔄 Apply signal sent to Worker...")
 
     elif data == "btn_settings":
         proj = projects_col.find_one({"user_id": user_id})
@@ -711,13 +704,20 @@ async def callback_handler(client, query: CallbackQuery):
     elif data == "btn_logs":
         proj = projects_col.find_one({"user_id": user_id})
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="btn_logs"), InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]])
-        if proj.get("status") == "crashed":
-            text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔴 BOT CRASHED       ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🤖 `{proj.get('project_name', 'Bot')}`\n🖥️ Node #{proj.get('target_node', 1)}\n\n⚠️ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━━\n```\n{proj.get('latest_error', 'No trace found.')[-1500:]}\n```\n━━━━━━━━━━━━━━━━━━━━━━")
+        
+        status = proj.get("status", "")
+        if status in ["crashed", "error"]:
+            text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔴 BOT CRASHED       ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🤖 `{proj.get('project_name', 'Bot')}`\n🖥️ Node #{proj.get('target_node', 1)}\n\n⚠️ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━━\n```\n{proj.get('latest_error', 'No build log or trace found.')[-1500:]}\n```\n━━━━━━━━━━━━━━━━━━━━━━")
             return await query.message.edit_text(text, reply_markup=kb)
-        if proj.get("status") == "stopped": return await query.message.edit_text("⚠️ Container is currently STOPPED.", reply_markup=kb)
+            
+        if status == "stopped": return await query.message.edit_text("⚠️ Container is currently STOPPED.", reply_markup=kb)
+
+        cid = proj.get("container_id")
+        if not cid:
+            return await query.message.edit_text("⚠️ Error: Container ID is missing in database.", reply_markup=kb)
 
         if proj["target_node"] == NODE_ID:
-            try: logs = docker_client.containers.get(proj["container_id"]).logs(tail=50).decode("utf-8", errors="ignore")
+            try: logs = docker_client.containers.get(cid).logs(tail=50).decode("utf-8", errors="ignore")
             except: logs = "Log retrieval error."
             await query.message.edit_text(f"📜 **LOGS (Node 1):**\n```\n{logs[-2000:]}\n```", reply_markup=kb)
         else:
@@ -728,30 +728,41 @@ async def callback_handler(client, query: CallbackQuery):
 
     elif data == "btn_stop":
         proj = projects_col.find_one({"user_id": user_id})
+        if not proj: return await query.answer("No active bot!", show_alert=True)
+        if proj.get("status") in ["crashed", "error"]:
+            return await query.answer("Bot is already CRASHED. You cannot stop it. Please click Delete.", show_alert=True)
+
         if proj["target_node"] == NODE_ID:
-            try: c = docker_client.containers.get(proj["container_id"]); c.stop(); c.remove(force=True)
-            except: pass
+            cid = proj.get("container_id")
+            if cid:
+                try: 
+                    c = docker_client.containers.get(cid)
+                    c.stop()
+                    c.remove(force=True)
+                except: pass
             projects_col.update_one({"_id": proj["_id"]}, {"$set": {"status": "stopped"}, "$unset": {"container_id": ""}})
             await render_dashboard(client, query.message, user_id, is_edit=True)
-        else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "stop", "status": "stopping"}}); await query.message.edit_text("🟡 Stopping Bot on Remote Node...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]]))
-
-    elif data == "btn_start":
-        proj = projects_col.find_one({"user_id": user_id})
-        if proj["target_node"] == NODE_ID:
-            try:
-                new_c = docker_client.containers.run(proj["image_tag"], name=f"anysnap_bot_{user_id}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
-                projects_col.update_one({"_id": proj["_id"]}, {"$set": {"status": "running", "container_id": new_c.id, "started_at": time.time()}})
-            except Exception as e: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"status": "crashed", "latest_error": str(e)}})
-            await render_dashboard(client, query.message, user_id, is_edit=True)
-        else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "start", "status": "starting"}}); await query.message.edit_text("🟡 Booting Bot on Remote Node...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]]))
+        else: 
+            projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "stop", "status": "stopping"}})
+            await query.message.edit_text("🟡 Stopping Bot on Remote Node...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]]))
 
     elif data == "btn_delete":
         proj = projects_col.find_one({"user_id": user_id})
+        if not proj: return await query.answer("Already deleted!", show_alert=True)
+        
         if proj["target_node"] == NODE_ID:
-            try: c = docker_client.containers.get(proj.get("container_id", "")); c.stop(); c.remove(force=True)
-            except: pass
-            projects_col.delete_one({"_id": proj["_id"]}); asyncio.create_task(cleanup_docker_images(user_id))
-        else: projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "delete"}})
+            cid = proj.get("container_id")
+            if cid:
+                try: 
+                    c = docker_client.containers.get(cid)
+                    c.stop()
+                    c.remove(force=True)
+                except: pass
+            projects_col.delete_one({"_id": proj["_id"]})
+            asyncio.create_task(cleanup_docker_images(user_id))
+        else: 
+            projects_col.update_one({"_id": proj["_id"]}, {"$set": {"action": "delete"}})
+            
         await query.message.edit_text("🗑️ Project Deleted & Resources Wiped.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Return Home", callback_data="btn_refresh_dash")]]))
 
 # ================= RUNNERS =================
@@ -764,11 +775,10 @@ if __name__ == "__main__":
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # Schedule our background sync loop safely
         loop.create_task(heartbeat_loop())
         
         print("👑 ANYSNAP CLOUD MASTER NODE STARTED: Listening for Telegram messages...")
-        app.run()  # <-- Yeh command purane code me tha, ye hamesha perfect chalta hai!
+        app.run()
     else:
         print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} STARTED: Background Processing...")
         asyncio.run(worker_node_loop())
