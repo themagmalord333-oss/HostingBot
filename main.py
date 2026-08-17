@@ -161,14 +161,11 @@ async def heartbeat_loop():
         await asyncio.sleep(10)
 
 def get_best_node():
-    # Sirf un nodes ko laao jo last 30 seconds me active the
     active_nodes = list(nodes_col.find({"last_seen": {"$gt": time.time() - 30}}).sort([("cpu", 1), ("ram", 1)]))
     
-    # Agar koi node active nahi hai, toh Master Node (1) par fallback karo
     if not active_nodes: 
         return 1 
         
-    # Jo sabse kam loaded (CPU/RAM) node hai, usko return kar do
     best_node = active_nodes[0]
     return best_node["node_id"]
 
@@ -223,7 +220,6 @@ async def cleanup_docker_images(user_id):
             except: pass
 
 def strip_top_level_folder(extract_dir):
-    """GitHub ZIP files hamesha ek root folder add kar dete hain. Ye us folder ko hata kar files ko bahar nikalta hai."""
     items = os.listdir(extract_dir)
     if len(items) == 1:
         single_folder = os.path.join(extract_dir, items[0])
@@ -234,7 +230,7 @@ def strip_top_level_folder(extract_dir):
 
 # ================= 🚀 SMART ENTRY DETECTION =================
 def detect_project_entry(bot_dir):
-    # 1. Python package with __main__.py (e.g., MagmaMusic)
+    # 1. Python package with __main__.py
     for root, dirs, files in os.walk(bot_dir):
         if "__main__.py" in files:
             rel_dir = os.path.relpath(root, bot_dir)
@@ -298,16 +294,13 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     try: os.remove(dockerfile_path)
     except: pass
 
-    # Smart Base Image
     base_img = "python:3.12-slim" if project_type in ["python", "python_module"] else "node:22-alpine"
     
-    # 🟢 FIXED: Removed neofetch from here
     if project_type in ["python", "python_module"]: 
         install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash git ffmpeg imagemagick libwebp-dev curl && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
     elif project_type == "node": 
         install_step = ("RUN adduser -D botuser\nRUN find /app -type f -iname 'package.json' -execdir npm install \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
 
-    # Smart Execution Command (Sanitized)
     if run_cmd: 
         safe_cmd = run_cmd.replace('\n', ' ').replace('\r', '')
         exec_cmd = f'CMD {safe_cmd}\n'
@@ -331,8 +324,8 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
 
     await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "STARTING", "image_tag": image_tag, "last_action_time": time.time()}})
 
-    # Changed read_only to False to support bot databases and generic setups
-    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+    # 🟢 FIXED: security_opt=["no-new-privileges:true"]
+    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
     except Exception as e: return False, f"Container Start Error: {e}", image_tag
 
     await asyncio.sleep(3)
@@ -353,7 +346,6 @@ async def worker_node_loop():
         task = await asyncio.to_thread(projects_col.find_one, {"target_node": NODE_ID, "status": "QUEUED"})
         if task:
             try:
-                # Dashboard Extracting Notification
                 await asyncio.to_thread(projects_col.update_one, {"_id": task["_id"]}, {"$set": {"status": "EXTRACTING"}})
                 
                 work_dir = os.path.join(HOST_DIR, str(task["user_id"]))
@@ -362,8 +354,6 @@ async def worker_node_loop():
 
                 with open(zip_path, "wb") as f: f.write(fs.get(task["file_id"]).read())
                 safe_extract_zip(zip_path, extract_dir)
-                
-                # Fix GitHub ZIP structure
                 strip_top_level_folder(extract_dir)
 
                 success, cid_or_logs, img_tag = await deploy_docker_container(task["_id"], task["user_id"], extract_dir, task.get("type", "python"), task.get("entry", "main.py"), task.get("env_vars", {}), task.get("run_cmd"))
@@ -390,8 +380,8 @@ async def worker_node_loop():
                         except: pass
                     img = cmd_task.get("image_tag")
                     if img:
-                        # Changed read_only to False
-                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                        # 🟢 FIXED: security_opt=["no-new-privileges:true"]
+                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                         await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "STARTING", "container_id": new_c.id, "last_action_time": time.time()}})
                     else: await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "ERROR", "latest_error": "Missing Image Tag."}})
                         
@@ -426,7 +416,6 @@ async def worker_node_loop():
                     await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"latest_logs": logs}})
                     
             except Exception as e: 
-                # 🟢 NEW FIX: User Friendly Docker Not Found Error
                 err_msg = str(e)
                 if "pull access denied" in err_msg or "Not Found" in err_msg:
                     err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
@@ -556,16 +545,13 @@ async def handle_document_upload(client, message):
                 await message.download(file_name=zip_path)
                 safe_extract_zip(zip_path, extract_dir)
                 
-                # Fix GitHub ZIP structure
                 strip_top_level_folder(extract_dir)
-                # ZIP ko waapas pack kar do taaki Database me clean ZIP save ho
                 rezip_workspace(user_dir)
 
             project_data = detect_project_entry(extract_dir)
             if project_data:
                 proj_name = doc.file_name.replace(".zip", "").replace(".py", "")
                 
-                # Setup default Run Command specifically honoring python packages
                 if project_data["type"] == "python_module":
                     default_cmd = f"python -m {project_data['entry']}"
                 elif project_data["type"] == "python":
@@ -697,7 +683,6 @@ async def callback_handler(client, query: CallbackQuery):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_stats")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
         await query.message.edit_text(text, reply_markup=kb)
 
-    # 🟢 APPROVE / REJECT ACTIONS WITH ANIMATION
     elif data.startswith("approve_"):
         await query.answer("⏳ Approving Project...", show_alert=False)
         proj_id = ObjectId(data.split("_")[1])
@@ -772,7 +757,6 @@ async def callback_handler(client, query: CallbackQuery):
         prog_msg = await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ ANYSNAP CLOUD     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n⏳ Preparing deployment...")
         target_node = get_best_node()
         
-        # File handle memory leak fixed
         with open(state["zip_path"], "rb") as f:
             file_id = await asyncio.to_thread(fs.put, f, filename=f"user_{user_id}.zip")
             
@@ -838,7 +822,6 @@ async def callback_handler(client, query: CallbackQuery):
                 await asyncio.sleep(2)
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "RUNNING", "started_at": time.time()}})
             except Exception as e: 
-                # 🟢 NEW FIX: User Friendly Docker Not Found Error
                 err_msg = str(e)
                 if "pull access denied" in err_msg or "Not Found" in err_msg:
                     err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
@@ -869,11 +852,10 @@ async def callback_handler(client, query: CallbackQuery):
                         old_c = await asyncio.to_thread(docker_client.containers.get, cid)
                         await asyncio.to_thread(old_c.stop); await asyncio.to_thread(old_c.remove, force=True)
                     except: pass
-                # Changed read_only to False
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                # 🟢 FIXED: security_opt=["no-new-privileges:true"]
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
             except Exception as e: 
-                # 🟢 NEW FIX: User Friendly Docker Not Found Error
                 err_msg = str(e)
                 if "pull access denied" in err_msg or "Not Found" in err_msg:
                     err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
@@ -963,11 +945,10 @@ async def callback_handler(client, query: CallbackQuery):
 
         if proj.get("target_node", 1) == NODE_ID:
             try:
-                # Changed read_only to False
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                # 🟢 FIXED: security_opt=["no-new-privileges:true"]
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
             except Exception as e: 
-                # 🟢 NEW FIX: User Friendly Docker Not Found Error
                 err_msg = str(e)
                 if "pull access denied" in err_msg or "Not Found" in err_msg:
                     err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
