@@ -300,8 +300,9 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     # Smart Base Image
     base_img = "python:3.12-slim" if project_type in ["python", "python_module"] else "node:22-alpine"
     
+    # 🟢 ADDED OS DEPENDENCIES HERE (git, ffmpeg, imagemagick, etc.)
     if project_type in ["python", "python_module"]: 
-        install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
+        install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash git ffmpeg imagemagick libwebp-dev curl neofetch && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
     elif project_type == "node": 
         install_step = ("RUN adduser -D botuser\nRUN find /app -type f -iname 'package.json' -execdir npm install \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
 
