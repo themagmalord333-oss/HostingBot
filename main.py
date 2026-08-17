@@ -160,14 +160,15 @@ async def heartbeat_loop():
         await asyncio.sleep(10)
 
 def get_best_node():
+    # Sirf un nodes ko laao jo last 30 seconds me active the
     active_nodes = list(nodes_col.find({"last_seen": {"$gt": time.time() - 30}}).sort([("cpu", 1), ("ram", 1)]))
-    active_ids = [n["node_id"] for n in active_nodes]
-    if not active_nodes: return 1 
+    
+    # Agar koi node active nahi hai, toh Master Node (1) par fallback karo
+    if not active_nodes: 
+        return 1 
+        
+    # Jo sabse kam loaded (CPU/RAM) node hai, usko return kar do
     best_node = active_nodes[0]
-    if best_node.get("cpu", 0) > 85.0 or best_node.get("ram", 0) > 85.0:
-        for i in range(1, MAX_NODES + 1):
-            if i not in active_ids: return i
-        return best_node["node_id"] 
     return best_node["node_id"]
 
 async def trigger_github_worker(target_node):
@@ -220,6 +221,65 @@ async def cleanup_docker_images(user_id):
             try: await asyncio.to_thread(docker_client.images.remove, img.id, force=True)
             except: pass
 
+def strip_top_level_folder(extract_dir):
+    """GitHub ZIP files hamesha ek root folder add kar dete hain. Ye us folder ko hata kar files ko bahar nikalta hai."""
+    items = os.listdir(extract_dir)
+    if len(items) == 1:
+        single_folder = os.path.join(extract_dir, items[0])
+        if os.path.isdir(single_folder):
+            for item in os.listdir(single_folder):
+                shutil.move(os.path.join(single_folder, item), extract_dir)
+            os.rmdir(single_folder)
+
+# ================= 🚀 SMART ENTRY DETECTION =================
+def detect_project_entry(bot_dir):
+    # 1. Python package with __main__.py (e.g., MagmaMusic)
+    for root, dirs, files in os.walk(bot_dir):
+        if "__main__.py" in files:
+            rel_dir = os.path.relpath(root, bot_dir)
+            package_name = os.path.basename(root)
+            return {
+                "type": "python_module",
+                "entry": package_name,
+                "root": bot_dir,
+                "has_req": os.path.exists(os.path.join(bot_dir, "requirements.txt"))
+            }
+
+    # 2. Normal Python project (single file entry)
+    for root, _, files in os.walk(bot_dir):
+        files_lower = [f.lower() for f in files]
+        rel_dir = os.path.relpath(root, bot_dir)
+        py_files = [f for f in files if f.endswith(".py")]
+        has_req = "requirements.txt" in files_lower
+
+        if has_req or py_files:
+            for f in ["main.py", "bot.py", "app.py", "server.py", "run.py", "index.py", "sting.py"]:
+                if f in files:
+                    return {
+                        "type": "python",
+                        "entry": os.path.join(rel_dir, f) if rel_dir != "." else f,
+                        "root": bot_dir,
+                        "has_req": has_req
+                    }
+            if py_files:
+                return {
+                    "type": "python",
+                    "entry": os.path.join(rel_dir, py_files[0]) if rel_dir != "." else py_files[0],
+                    "root": bot_dir,
+                    "has_req": has_req
+                }
+
+    # 3. Node.js project
+    for root, _, files in os.walk(bot_dir):
+        if "package.json" in [f.lower() for f in files]:
+            return {
+                "type": "node",
+                "entry": "package.json",
+                "root": bot_dir,
+                "has_req": True
+            }
+    return None
+
 # ================= DOCKER DEPLOYMENT =================
 async def deploy_docker_container(proj_id, user_id, root, project_type, entry, env_vars=None, run_cmd=None):
     image_tag = f"anysnap_{user_id}_{int(time.time())}"
@@ -237,15 +297,24 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     try: os.remove(dockerfile_path)
     except: pass
 
-    base_img = "python:3.12-slim" if project_type == "python" else "node:22-alpine"
-    if project_type == "python": 
+    # Smart Base Image
+    base_img = "python:3.12-slim" if project_type in ["python", "python_module"] else "node:22-alpine"
+    
+    if project_type in ["python", "python_module"]: 
         install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
     elif project_type == "node": 
         install_step = ("RUN adduser -D botuser\nRUN find /app -type f -iname 'package.json' -execdir npm install \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
 
-    if run_cmd: exec_cmd = f'CMD {run_cmd}\n'
-    elif project_type == "python": exec_cmd = f'CMD ["python", "{entry}"]\n'
-    else: exec_cmd = f'CMD ["npm", "start"]\n'
+    # Smart Execution Command (Sanitized)
+    if run_cmd: 
+        safe_cmd = run_cmd.replace('\n', ' ').replace('\r', '')
+        exec_cmd = f'CMD {safe_cmd}\n'
+    elif project_type == "python_module": 
+        exec_cmd = f'CMD ["python", "-m", "{entry}"]\n'
+    elif project_type == "python": 
+        exec_cmd = f'CMD ["python", "{entry}"]\n'
+    else: 
+        exec_cmd = f'CMD ["npm", "start"]\n'
 
     with open(dockerfile_path, "w") as df: df.write(f"FROM {base_img}\nWORKDIR /app\nCOPY . /app/\n{install_step}{exec_cmd}\n")
 
@@ -260,7 +329,8 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
 
     await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "STARTING", "image_tag": image_tag, "last_action_time": time.time()}})
 
-    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+    # Changed read_only to False to support bot databases and generic setups
+    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
     except Exception as e: return False, f"Container Start Error: {e}", image_tag
 
     await asyncio.sleep(3)
@@ -281,7 +351,7 @@ async def worker_node_loop():
         task = await asyncio.to_thread(projects_col.find_one, {"target_node": NODE_ID, "status": "QUEUED"})
         if task:
             try:
-                # Tell dashboard that extraction has started
+                # Dashboard Extracting Notification
                 await asyncio.to_thread(projects_col.update_one, {"_id": task["_id"]}, {"$set": {"status": "EXTRACTING"}})
                 
                 work_dir = os.path.join(HOST_DIR, str(task["user_id"]))
@@ -290,6 +360,9 @@ async def worker_node_loop():
 
                 with open(zip_path, "wb") as f: f.write(fs.get(task["file_id"]).read())
                 safe_extract_zip(zip_path, extract_dir)
+                
+                # Fix GitHub ZIP structure
+                strip_top_level_folder(extract_dir)
 
                 success, cid_or_logs, img_tag = await deploy_docker_container(task["_id"], task["user_id"], extract_dir, task.get("type", "python"), task.get("entry", "main.py"), task.get("env_vars", {}), task.get("run_cmd"))
 
@@ -315,7 +388,8 @@ async def worker_node_loop():
                         except: pass
                     img = cmd_task.get("image_tag")
                     if img:
-                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                        # Changed read_only to False
+                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                         await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "STARTING", "container_id": new_c.id, "last_action_time": time.time()}})
                     else: await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "ERROR", "latest_error": "Missing Image Tag."}})
                         
@@ -352,20 +426,7 @@ async def worker_node_loop():
             except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"latest_error": str(e), "status": "ERROR"}})
         await asyncio.sleep(2)
 
-# ================= UI & UTILS =================
-def detect_project_entry(bot_dir):
-    for root, _, files in os.walk(bot_dir):
-        files_lower, rel_dir = [f.lower() for f in files], os.path.relpath(root, bot_dir)
-        py_files = [f for f in files if f.endswith('.py')]
-        has_req = "requirements.txt" in files_lower
-
-        if has_req or py_files:
-            for f in ["main.py", "bot.py", "app.py", "server.py", "run.py", "sting.py", "index.py"]:
-                if f in files: return {"type": "python", "entry": os.path.join(rel_dir, f) if rel_dir != "." else f, "root": bot_dir, "has_req": has_req}
-            if py_files: return {"type": "python", "entry": os.path.join(rel_dir, py_files[0]) if rel_dir != "." else py_files[0], "root": bot_dir, "has_req": has_req}
-        if "package.json" in files_lower: return {"type": "node", "entry": "package.json", "root": bot_dir, "has_req": True}
-    return None
-
+# ================= UI HELPERS =================
 async def ask_for_run_command(client, user_id, edit_msg):
     state = USER_STATE.get(user_id)
     if not state: return
@@ -408,7 +469,6 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             
             text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃  🐳 ANYSNAP CLOUD    ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n{emoji}  **{status}**\n━━━━━━━━━━━━━━━━━━━━━━\n🤖  `{proj.get('project_name', 'Anysnap App')}`\n⚡  `{proj.get('run_cmd', 'python main.py')}`\n\n🖥️  NODE\n└─ #{proj.get('target_node', 1)} {'MASTER' if proj.get('target_node', 1) == 1 else 'WORKER'}\n\n")
 
-            # LIVE BACKEND STATUS UPDATES IN DASHBOARD
             if status == "QUEUED":
                 text += "⏳ **QUEUED:** Waiting for worker to start...\n\n"
             elif status == "EXTRACTING":
@@ -487,15 +547,27 @@ async def handle_document_upload(client, message):
             else:
                 await message.download(file_name=zip_path)
                 safe_extract_zip(zip_path, extract_dir)
+                
+                # Fix GitHub ZIP structure
+                strip_top_level_folder(extract_dir)
+                # ZIP ko waapas pack kar do taaki Database me clean ZIP save ho
+                rezip_workspace(user_dir)
 
             project_data = detect_project_entry(extract_dir)
             if project_data:
                 proj_name = doc.file_name.replace(".zip", "").replace(".py", "")
-                default_cmd = f"python {project_data['entry']}" if project_data['type'] == "python" else "npm start"
+                
+                # Setup default Run Command specifically honoring python packages
+                if project_data["type"] == "python_module":
+                    default_cmd = f"python -m {project_data['entry']}"
+                elif project_data["type"] == "python":
+                    default_cmd = f"python {project_data['entry']}"
+                else:
+                    default_cmd = "npm start"
                 
                 USER_STATE[user_id] = {**project_data, "dir": user_dir, "zip_path": zip_path, "env_vars": {}, "project_name": proj_name, "run_cmd": default_cmd}
 
-                if project_data["type"] == "python" and not project_data["has_req"]:
+                if project_data["type"] in ["python", "python_module"] and not project_data["has_req"]:
                     REQ_WAITING[user_id] = True
                     await status_msg.edit_text("⚠️ **No `requirements.txt` detected.**\nSend dependencies in chat or click Skip.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Skip", callback_data="btn_skip_req")]]))
                 else:
@@ -550,7 +622,6 @@ async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
 
-    # 👑 OWNER CONTROLS (STRICTLY NO ALERTS FOR MENUS, ONLY INLINE EDITS)
     owner_actions = data.startswith("owner_") or data.startswith("approve_") or data.startswith("reject_")
     if owner_actions and not is_owner(user_id):
         return await query.answer("❌ Owner Only!", show_alert=True)
@@ -618,7 +689,7 @@ async def callback_handler(client, query: CallbackQuery):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_stats")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
         await query.message.edit_text(text, reply_markup=kb)
 
-    # 🟢 APPROVE / REJECT ACTIONS WITH ANIMATION & GITHUB TRIGGER FIX
+    # 🟢 APPROVE / REJECT ACTIONS WITH ANIMATION
     elif data.startswith("approve_"):
         await query.answer("⏳ Approving Project...", show_alert=False)
         proj_id = ObjectId(data.split("_")[1])
@@ -629,19 +700,15 @@ async def callback_handler(client, query: CallbackQuery):
             old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
 
         if proj:
-            # 1. Update Database to QUEUED
             await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "QUEUED"}})
             
-            # 2. Trigger Worker if remote
             target_node = proj.get("target_node", 1)
             if target_node != NODE_ID:
                 await trigger_github_worker(target_node)
             
-            # 3. Final Success Text & Remove Buttons (reply_markup=None)
             try: await query.message.edit_caption(f"{old_caption}\n\n✅ **STATUS: APPROVED & QUEUED!**\n🖥️ Target: Node #{target_node}", reply_markup=None)
             except: pass
             
-            # 4. Notify the User
             try: await app.send_message(proj["user_id"], "🎉 Your deployment request has been **APPROVED**!\nIt is now queued for cloud deployment.\n\nClick /start to check live dashboard.")
             except: pass
 
@@ -655,24 +722,21 @@ async def callback_handler(client, query: CallbackQuery):
             old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
 
         if proj:
-            # 1. Wipe Database and Cleanup
             await asyncio.to_thread(projects_col.delete_one, {"_id": proj_id})
             try: fs.delete(proj["file_id"])
             except: pass
             cleanup_workspace(proj["user_id"])
             
-            # 2. Final Fail Text & Remove Buttons
             try: await query.message.edit_caption(f"{old_caption}\n\n❌ **STATUS: REJECTED!**", reply_markup=None)
             except: pass
             
-            # 3. Notify User
             try: await app.send_message(proj["user_id"], "❌ Your deployment request was **REJECTED** by the Admin.")
             except: pass
 
-    # CUSTOM COMMAND SELECTION
     elif data == "btn_use_default_cmd":
         await query.answer()
         await show_deploy_confirmation(client, user_id, query.message.chat.id, edit_msg=query.message)
+        
     elif data == "btn_custom_cmd":
         await query.answer()
         CMD_WAITING[user_id] = True
@@ -699,7 +763,11 @@ async def callback_handler(client, query: CallbackQuery):
         
         prog_msg = await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ ANYSNAP CLOUD     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n⏳ Preparing deployment...")
         target_node = get_best_node()
-        file_id = await asyncio.to_thread(fs.put, open(state["zip_path"], "rb"), filename=f"user_{user_id}.zip")
+        
+        # File handle memory leak fixed
+        with open(state["zip_path"], "rb") as f:
+            file_id = await asyncio.to_thread(fs.put, f, filename=f"user_{user_id}.zip")
+            
         auto_approve = get_auto_approve()
         initial_status = "QUEUED" if auto_approve else "PENDING_APPROVAL"
         
@@ -709,7 +777,6 @@ async def callback_handler(client, query: CallbackQuery):
         result = await asyncio.to_thread(projects_col.insert_one, db_doc)
         project_id = result.inserted_id
 
-        # FORWARDING FILE TO OWNER FOR MANUAL APPROVAL
         if not auto_approve:
             await prog_msg.edit_text("⏳ Your deployment request has been sent for approval.")
             try: 
@@ -737,13 +804,10 @@ async def callback_handler(client, query: CallbackQuery):
             cleanup_workspace(user_id)
             return
 
-        # IF AUTO APPROVE IS ON, WE ONLY START THE ANIMATION (WORKER LOOP HANDLES DEPLOYMENT)
         anim_task = asyncio.create_task(animate_status(prog_msg, project_id, "deploy"))
-
         if target_node != NODE_ID: 
             await trigger_github_worker(target_node)
             
-        # The background worker_node_loop will automatically pick up this QUEUED task!
         USER_STATE.pop(user_id, None); cleanup_workspace(user_id)
 
     elif data == "btn_restart":
@@ -789,7 +853,8 @@ async def callback_handler(client, query: CallbackQuery):
                         old_c = await asyncio.to_thread(docker_client.containers.get, cid)
                         await asyncio.to_thread(old_c.stop); await asyncio.to_thread(old_c.remove, force=True)
                     except: pass
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                # Changed read_only to False
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
             except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": str(e)}})
         else: 
@@ -852,7 +917,8 @@ async def callback_handler(client, query: CallbackQuery):
 
         if proj.get("target_node", 1) == NODE_ID:
             try:
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=True, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                # Changed read_only to False
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
             except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": str(e)}})
         else: 
@@ -916,7 +982,7 @@ if __name__ == "__main__":
     
     print("⏳ Starting Background Tasks...")
     loop.create_task(heartbeat_loop())
-    loop.create_task(worker_node_loop()) # 🔥 FIXED: Master ab background me Worker ka bhi kaam karega!
+    loop.create_task(worker_node_loop())
     
     if NODE_ID == 1:
         print("👑 ANYSNAP CLOUD MASTER NODE STARTED: Listening for Telegram messages...")
