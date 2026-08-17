@@ -13,6 +13,7 @@ from pymongo import MongoClient
 import gridfs
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.errors import MessageNotModified
 
 import config
 
@@ -888,24 +889,45 @@ async def callback_handler(client, query: CallbackQuery):
         status = proj.get("status", "UNKNOWN").upper()
         if status in ["CRASHED", "ERROR"]:
             text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🔴 CRASH / BUILD LOGS┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🤖 `{proj.get('project_name', 'Bot')}`\n🖥️ Node #{proj.get('target_node', 1)}\n\n⚠️ **ERROR TRACE**\n━━━━━━━━━━━━━━━━━━━━━━\n```\n{proj.get('latest_error', 'No trace found. Container stopped.')[-1500:]}\n```\n━━━━━━━━━━━━━━━━━━━━━━")
-            return await query.message.edit_text(text, reply_markup=kb)
-
+            try:
+                return await query.message.edit_text(text, reply_markup=kb)
+            except MessageNotModified:
+                return
+                
         cid = proj.get("container_id")
-        if not cid: return await query.message.edit_text("⚠️ Container ID is missing.", reply_markup=kb)
+        if not cid: 
+            try:
+                return await query.message.edit_text("⚠️ Container ID is missing.", reply_markup=kb)
+            except MessageNotModified:
+                return
 
         if proj.get("target_node", 1) == NODE_ID:
             try: logs = (await asyncio.to_thread((await asyncio.to_thread(docker_client.containers.get, cid)).logs, tail=50)).decode("utf-8", errors="ignore")
             except: logs = "Log retrieval error. Container might be down."
-            await query.message.edit_text(f"📜 **LOGS (Node 1):**\n```\n{logs[-2000:]}\n```", reply_markup=kb)
+            
+            try:
+                await query.message.edit_text(f"📜 **LOGS (Node 1):**\n```\n{logs[-2000:]}\n```", reply_markup=kb)
+            except MessageNotModified:
+                pass
         else:
             await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"action": "get_logs"}})
-            await query.message.edit_text("⏳ Fetching logs from remote node (Fast Polling)...", reply_markup=InlineKeyboardMarkup([]))
+            try:
+                await query.message.edit_text("⏳ Fetching logs from remote node (Fast Polling)...", reply_markup=InlineKeyboardMarkup([]))
+            except MessageNotModified:
+                pass
             
             for _ in range(20): 
                 await asyncio.sleep(0.35)
                 p = await asyncio.to_thread(projects_col.find_one, {"_id": proj["_id"]})
-                if "action" not in p and "latest_logs" in p: return await query.message.edit_text(f"📜 **LOGS (Node {proj.get('target_node', 1)}):**\n```\n{p.get('latest_logs', 'Empty')} \n```", reply_markup=kb)
-            await query.message.edit_text("⏳ Remote node is slow or unresponsive. Please refresh.", reply_markup=kb)
+                if "action" not in p and "latest_logs" in p: 
+                    try:
+                        return await query.message.edit_text(f"📜 **LOGS (Node {proj.get('target_node', 1)}):**\n```\n{p.get('latest_logs', 'Empty')} \n```", reply_markup=kb)
+                    except MessageNotModified:
+                        return
+            try:
+                await query.message.edit_text("⏳ Remote node is slow or unresponsive. Please refresh.", reply_markup=kb)
+            except MessageNotModified:
+                pass
 
     elif data == "btn_start":
         proj = await asyncio.to_thread(projects_col.find_one, {"user_id": user_id})
