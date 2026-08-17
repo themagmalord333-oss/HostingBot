@@ -301,9 +301,9 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     # Smart Base Image
     base_img = "python:3.12-slim" if project_type in ["python", "python_module"] else "node:22-alpine"
     
-    # 🟢 ADDED OS DEPENDENCIES HERE (git, ffmpeg, imagemagick, etc.)
+    # 🟢 FIXED: Removed neofetch from here
     if project_type in ["python", "python_module"]: 
-        install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash git ffmpeg imagemagick libwebp-dev curl neofetch && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
+        install_step = ("RUN useradd -m botuser && apt-get update && apt-get install -y gcc g++ make bash git ffmpeg imagemagick libwebp-dev curl && rm -rf /var/lib/apt/lists/*\nRUN python -m pip install python-dotenv\nRUN find /app -type f -iname 'requirements.txt' -exec python -m pip install --no-cache-dir -r '{}' \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
     elif project_type == "node": 
         install_step = ("RUN adduser -D botuser\nRUN find /app -type f -iname 'package.json' -execdir npm install \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
 
@@ -332,7 +332,7 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "STARTING", "image_tag": image_tag, "last_action_time": time.time()}})
 
     # Changed read_only to False to support bot databases and generic setups
-    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+    try: container = await asyncio.to_thread(docker_client.containers.run, image_tag, name=container_name, detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=env_vars, restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
     except Exception as e: return False, f"Container Start Error: {e}", image_tag
 
     await asyncio.sleep(3)
@@ -391,7 +391,7 @@ async def worker_node_loop():
                     img = cmd_task.get("image_tag")
                     if img:
                         # Changed read_only to False
-                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                        new_c = await asyncio.to_thread(docker_client.containers.run, img, name=f"anysnap_bot_{cmd_task['user_id']}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=cmd_task.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                         await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "STARTING", "container_id": new_c.id, "last_action_time": time.time()}})
                     else: await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"status": "ERROR", "latest_error": "Missing Image Tag."}})
                         
@@ -715,7 +715,7 @@ async def callback_handler(client, query: CallbackQuery):
                 await trigger_github_worker(target_node)
             
             try: await query.message.edit_caption(f"{old_caption}\n\n✅ **STATUS: APPROVED & QUEUED!**\n🖥️ Target: Node #{target_node}", reply_markup=None)
-            except: pass
+            except MessageNotModified: pass
             
             try: await app.send_message(proj["user_id"], "🎉 Your deployment request has been **APPROVED**!\nIt is now queued for cloud deployment.\n\nClick /start to check live dashboard.")
             except: pass
@@ -736,7 +736,7 @@ async def callback_handler(client, query: CallbackQuery):
             cleanup_workspace(proj["user_id"])
             
             try: await query.message.edit_caption(f"{old_caption}\n\n❌ **STATUS: REJECTED!**", reply_markup=None)
-            except: pass
+            except MessageNotModified: pass
             
             try: await app.send_message(proj["user_id"], "❌ Your deployment request was **REJECTED** by the Admin.")
             except: pass
@@ -786,7 +786,10 @@ async def callback_handler(client, query: CallbackQuery):
         project_id = result.inserted_id
 
         if not auto_approve:
-            await prog_msg.edit_text("⏳ Your deployment request has been sent for approval.")
+            try:
+                await prog_msg.edit_text("⏳ Your deployment request has been sent for approval.")
+            except MessageNotModified: pass
+            
             try: 
                 caption_text = (f"🔔 DEPLOYMENT REQUEST\n\n"
                                 f"📦 **{state.get('project_name', 'App')}**\n"
@@ -867,7 +870,7 @@ async def callback_handler(client, query: CallbackQuery):
                         await asyncio.to_thread(old_c.stop); await asyncio.to_thread(old_c.remove, force=True)
                     except: pass
                 # Changed read_only to False
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
             except Exception as e: 
                 # 🟢 NEW FIX: User Friendly Docker Not Found Error
@@ -889,12 +892,16 @@ async def callback_handler(client, query: CallbackQuery):
         env_text = "\n".join([f"• `{k}`: `{v}`" for k, v in active_env.items()]) if active_env else "None"
         text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚙️ PROJECT SETTINGS  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🔐 **ENVIRONMENT**\n━━━━━━━━━━━━━━━━━━━━━━\n{env_text}\n\n💾 **RESOURCES**\n├─ RAM       `512 MB`\n├─ CPU       `1 Core`\n└─ Processes `128`\n\n🛡 **SECURITY**\n├─ Sandbox       🟢 ON\n├─ Privileges    🔒 Restricted\n└─ Auto Restart  🟢 ON\n━━━━━━━━━━━━━━━━━━━━━━\n*(💡 Save temp data inside `/app/data/`)*")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Add ENV Variable", callback_data="btn_add_env")], [InlineKeyboardButton("🔄 Restart & Apply Vars", callback_data="btn_apply_env")], [InlineKeyboardButton("⬅️ Dashboard", callback_data="btn_refresh_dash")]])
-        await query.message.edit_text(text, reply_markup=kb)
+        try:
+            await query.message.edit_text(text, reply_markup=kb)
+        except MessageNotModified: pass
 
     elif data == "btn_add_env":
         await query.answer()
         ENV_WAITING[user_id] = True
-        await query.message.edit_text("✍️ Send variable:\n`KEY=VALUE`")
+        try:
+            await query.message.edit_text("✍️ Send variable:\n`KEY=VALUE`")
+        except MessageNotModified: pass
 
     elif data == "btn_logs":
         await query.answer("📜 Fetching Logs...", show_alert=False)
@@ -1015,7 +1022,9 @@ async def callback_handler(client, query: CallbackQuery):
             await asyncio.sleep(3)
 
         anim_task.cancel()
-        await query.message.edit_text("✅ Project Deleted & Resources Wiped.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Return Home", callback_data="btn_refresh_dash")]]))
+        try:
+            await query.message.edit_text("✅ Project Deleted & Resources Wiped.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Return Home", callback_data="btn_refresh_dash")]]))
+        except MessageNotModified: pass
 
 # ================= RUNNERS =================
 if __name__ == "__main__":
