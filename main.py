@@ -425,7 +425,13 @@ async def worker_node_loop():
                     else: logs = "Container ID missing."
                     await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"latest_logs": logs}})
                     
-            except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"latest_error": str(e), "status": "ERROR"}})
+            except Exception as e: 
+                # 🟢 NEW FIX: User Friendly Docker Not Found Error
+                err_msg = str(e)
+                if "pull access denied" in err_msg or "Not Found" in err_msg:
+                    err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
+                await asyncio.to_thread(projects_col.update_one, {"_id": cmd_task["_id"]}, {"$set": {"latest_error": err_msg, "status": "ERROR"}})
+                
         await asyncio.sleep(2)
 
 # ================= UI HELPERS =================
@@ -828,7 +834,12 @@ async def callback_handler(client, query: CallbackQuery):
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "RESTARTING", "last_action_time": time.time()}})
                 await asyncio.sleep(2)
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "RUNNING", "started_at": time.time()}})
-            except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": str(e)}})
+            except Exception as e: 
+                # 🟢 NEW FIX: User Friendly Docker Not Found Error
+                err_msg = str(e)
+                if "pull access denied" in err_msg or "Not Found" in err_msg:
+                    err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
+                await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": err_msg}})
         else: 
             await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"action": "restart", "status": "RESTARTING", "last_action_time": time.time()}})
             await asyncio.sleep(3)
@@ -858,7 +869,12 @@ async def callback_handler(client, query: CallbackQuery):
                 # Changed read_only to False
                 new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
-            except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": str(e)}})
+            except Exception as e: 
+                # 🟢 NEW FIX: User Friendly Docker Not Found Error
+                err_msg = str(e)
+                if "pull access denied" in err_msg or "Not Found" in err_msg:
+                    err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
+                await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": err_msg}})
         else: 
             await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"action": "apply_env"}})
             await asyncio.sleep(3)
@@ -941,9 +957,14 @@ async def callback_handler(client, query: CallbackQuery):
         if proj.get("target_node", 1) == NODE_ID:
             try:
                 # Changed read_only to False
-                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["no-new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
+                new_c = await asyncio.to_thread(docker_client.containers.run, image_tag, name=f"anysnap_bot_{user_id}_{int(time.time())}", detach=True, mem_limit="512m", memswap_limit="512m", nano_cpus=1_000_000_000, pids_limit=128, cap_drop=["ALL"], security_opt=["new-privileges:true"], read_only=False, privileged=False, network_mode="bridge", tmpfs={"/tmp": "rw,nosuid,nodev,noexec,size=64m", "/home/botuser/.cache": "rw,nosuid,nodev,size=64m", "/app/data": "rw,nosuid,nodev,size=128m"}, environment=proj.get("env_vars", {}), restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
                 await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"container_id": new_c.id, "status": "RUNNING", "started_at": time.time()}})
-            except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": str(e)}})
+            except Exception as e: 
+                # 🟢 NEW FIX: User Friendly Docker Not Found Error
+                err_msg = str(e)
+                if "pull access denied" in err_msg or "Not Found" in err_msg:
+                    err_msg = "⚠️ Docker Image missing on server (Storage wiped). Please click '🗑️ Delete' and upload your .zip file again to redeploy."
+                await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"status": "CRASHED", "latest_error": err_msg}})
         else: 
             await asyncio.to_thread(projects_col.update_one, {"_id": proj["_id"]}, {"$set": {"action": "start", "status": "STARTING", "last_action_time": time.time()}})
             await asyncio.sleep(3)
