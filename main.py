@@ -124,7 +124,7 @@ async def animate_status(message, project_id, operation):
             if status in ["RUNNING", "STOPPED", "CRASHED", "ERROR"]: break
             step = steps[i % len(steps)]
             spin = spinner[i % len(spinner)]
-            text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ MAGMA CLOUD       ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n{spin} **{operation.upper()}**\n━━━━━━━━━━━━━━━━━━━━━━\n\n🔹 {step}\n\n🟢 Cloud Engine\n🟢 Docker Engine\n🟢 Database\n🟡 Operation Running\n\n━━━━━━━━━━━━━━━━━━━━━━\n✨ Please wait...")
+            text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ ANYSNAP CLOUD     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n{spin} **{operation.upper()}**\n━━━━━━━━━━━━━━━━━━━━━━\n\n🔹 {step}\n\n🟢 Cloud Engine\n🟢 Docker Engine\n🟢 Database\n🟡 Operation Running\n\n━━━━━━━━━━━━━━━━━━━━━━\n✨ Please wait...")
             await message.edit_text(text)
             i += 1
             await asyncio.sleep(0.8)
@@ -220,7 +220,7 @@ async def cleanup_docker_images(user_id):
             try: await asyncio.to_thread(docker_client.images.remove, img.id, force=True)
             except: pass
 
-# ================= DOCKER DEPLOYMENT (WITH CUSTOM CMD SUPPORT) =================
+# ================= DOCKER DEPLOYMENT =================
 async def deploy_docker_container(proj_id, user_id, root, project_type, entry, env_vars=None, run_cmd=None):
     image_tag = f"anysnap_{user_id}_{int(time.time())}"
     container_name = f"anysnap_bot_{user_id}"
@@ -243,7 +243,6 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
     elif project_type == "node": 
         install_step = ("RUN adduser -D botuser\nRUN find /app -type f -iname 'package.json' -execdir npm install \\;\nRUN mkdir -p /app/data && chown -R botuser:botuser /app\nUSER botuser\n")
 
-    # Command Execution logic
     if run_cmd: exec_cmd = f'CMD {run_cmd}\n'
     elif project_type == "python": exec_cmd = f'CMD ["python", "{entry}"]\n'
     else: exec_cmd = f'CMD ["npm", "start"]\n'
@@ -368,10 +367,7 @@ async def ask_for_run_command(client, user_id, edit_msg):
     state = USER_STATE.get(user_id)
     if not state: return
     default_cmd = state.get('run_cmd', 'Unknown')
-    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚙️ START COMMAND      ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"We detected the following start command for your project:\n\n"
-            f"👉 `{default_cmd}`\n\n"
-            f"Do you want to use this, or enter a custom command (like `python3 -m mybot`)?")
+    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚙️ START COMMAND      ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\nWe detected the following start command for your project:\n\n👉 `{default_cmd}`\n\nDo you want to use this, or enter a custom command (like `python3 -m mybot`)?")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Use Detected Command", callback_data="btn_use_default_cmd")],
         [InlineKeyboardButton("✍️ Enter Custom Command", callback_data="btn_custom_cmd")],
@@ -382,15 +378,7 @@ async def ask_for_run_command(client, user_id, edit_msg):
 async def show_deploy_confirmation(client, user_id, chat_id, edit_msg=None):
     state = USER_STATE.get(user_id)
     if not state: return
-    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🚀 DEPLOYMENT        ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"📦 `{state.get('project_name', 'Unknown')}`\n"
-            f"⚡ `{state.get('run_cmd', 'Unknown')}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Project Verified\n"
-            f"✅ Security Scan Passed\n"
-            f"✅ Dependencies Validated\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Deploy to Secure Cloud?")
+    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🚀 DEPLOYMENT        ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n📦 `{state.get('project_name', 'Unknown')}`\n⚡ `{state.get('run_cmd', 'Unknown')}`\n━━━━━━━━━━━━━━━━━━━━━━\n✅ Project Verified\n✅ Security Scan Passed\n✅ Dependencies Validated\n━━━━━━━━━━━━━━━━━━━━━━\nDeploy to Secure Cloud?")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Deploy Now", callback_data="btn_deploy_confirm")], [InlineKeyboardButton("❌ Cancel", callback_data="btn_cancel")]])
     if edit_msg: await edit_msg.edit_text(text, reply_markup=kb)
     else: await client.send_message(chat_id, text, reply_markup=kb)
@@ -452,15 +440,6 @@ async def render_dashboard(client, message, user_id, is_edit=False):
 async def start_cmd(client, message):
     await render_dashboard(client, message, message.from_user.id, is_edit=False)
 
-@app.on_message(filters.command("stats"))
-async def stats_cmd(client, message):
-    total_bots = await asyncio.to_thread(projects_col.count_documents, {"status": "RUNNING"})
-    cpu = psutil.cpu_percent(interval=1)
-    ram = psutil.virtual_memory()
-    disk = psutil.disk_usage('/')
-    text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 📊 CLUSTER STATISTICS ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🖥️ **Master Node (Node 1)**\n⚡ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n💿 DISK: `{disk.percent}%`\n\n🤖 **Global Status**\n🟢 Running Bots: `{total_bots}`\n━━━━━━━━━━━━━━━━━━━━━━")
-    await message.reply_text(text)
-
 @app.on_message(filters.command("owner"))
 async def owner_cmd(client, message):
     if not is_owner(message.from_user.id): return await message.reply_text("❌ Access Denied.")
@@ -516,7 +495,6 @@ async def handle_document_upload(client, message):
 async def text_handler(client, message):
     user_id = message.from_user.id
     
-    # Custom Command Handler
     if user_id in CMD_WAITING:
         custom_cmd = message.text.strip()
         if user_id in USER_STATE:
@@ -525,7 +503,6 @@ async def text_handler(client, message):
         del CMD_WAITING[user_id]
         return
 
-    # Requirements Handler
     if user_id in REQ_WAITING:
         reqs = message.text.replace(",", "\n").replace(" ", "\n")
         state = USER_STATE.get(user_id)
@@ -537,7 +514,6 @@ async def text_handler(client, message):
         del REQ_WAITING[user_id]
         return
 
-    # Environment Variables Handler
     if user_id in ENV_WAITING:
         text = message.text
         if "=" not in text: return await message.reply_text("❌ Invalid format. Send as `KEY=VALUE`")
@@ -561,51 +537,141 @@ async def callback_handler(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
 
-    # 👑 OWNER CONTROLS LOGIC
+    # 👑 OWNER CONTROLS (STRICTLY NO ALERTS FOR MENUS, ONLY INLINE EDITS)
     owner_actions = data.startswith("owner_") or data.startswith("approve_") or data.startswith("reject_")
     if owner_actions and not is_owner(user_id):
         return await query.answer("❌ Owner Only!", show_alert=True)
 
     if data == "owner_auto_on": 
         set_auto_approve(True)
-        await query.answer("🟢 Auto Approve ON", show_alert=True)
+        await query.answer("🟢 Auto Approve ON", show_alert=False)
         await render_owner_panel(client, query.message, is_edit=True)
+        
     elif data == "owner_auto_off": 
         set_auto_approve(False)
-        await query.answer("🔴 Auto Approve OFF", show_alert=True)
+        await query.answer("🔴 Auto Approve OFF", show_alert=False)
         await render_owner_panel(client, query.message, is_edit=True)
+        
     elif data == "owner_panel": 
         await query.answer()
         await render_owner_panel(client, query.message, is_edit=True)
+        
     elif data == "owner_pending":
-        pending_bots = list(await asyncio.to_thread(projects_col.find, {"status": "PENDING_APPROVAL"}))
-        if not pending_bots: return await query.answer("No pending approvals.", show_alert=True)
-        text = "⏳ **PENDING APPROVALS:**\n\n"
-        for p in pending_bots: text += f"📦 `{p.get('project_name')}` (User: `{p.get('user_id')}`)\n"
-        await query.message.reply_text(text)
         await query.answer()
+        pending_bots = list(await asyncio.to_thread(projects_col.find, {"status": "PENDING_APPROVAL"}))
+        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⏳ PENDING APPROVALS ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        if not pending_bots:
+            text += "✅ No pending deployment requests.\n"
+        else:
+            for p in pending_bots:
+                text += f"📦 `{p.get('project_name')}`\n👤 User: `{p.get('user_id')}`\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_pending")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
+        await query.message.edit_text(text, reply_markup=kb)
+        
     elif data == "owner_projects":
+        await query.answer()
         total = await asyncio.to_thread(projects_col.count_documents, {})
         running = await asyncio.to_thread(projects_col.count_documents, {"status": "RUNNING"})
         crashed = await asyncio.to_thread(projects_col.count_documents, {"status": "CRASHED"})
-        await query.answer(f"Total: {total} | Running: {running} | Crashed: {crashed}", show_alert=True)
+        queued = await asyncio.to_thread(projects_col.count_documents, {"status": "QUEUED"})
+        text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🤖 PROJECTS OVERVIEW ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+                f"📦 Total Projects : `{total}`\n🟢 Running        : `{running}`\n🔴 Crashed        : `{crashed}`\n🟡 Queued         : `{queued}`\n\n━━━━━━━━━━━━━━━━━━━━━━")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_projects")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
+        await query.message.edit_text(text, reply_markup=kb)
+        
     elif data == "owner_nodes":
-        nodes = list(await asyncio.to_thread(nodes_col.find, {}))
-        text = "🌐 **NODE STATUS:**\n\n"
-        for n in nodes:
-            status = "🟢" if time.time() - n.get("last_seen", 0) < 60 else "🔴"
-            text += f"{status} **Node {n['node_id']}** ({n.get('role', 'WORKER')})\n⚡ CPU: {n.get('cpu', 0)}% | 💾 RAM: {n.get('ram', 0)}%\n\n"
-        await query.message.reply_text(text)
         await query.answer()
+        nodes = list(await asyncio.to_thread(nodes_col.find, {}))
+        text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 🌐 NODE STATUS       ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        if not nodes:
+            text += "⚠️ No nodes connected yet.\n"
+        else:
+            for n in nodes:
+                status = "🟢" if time.time() - n.get("last_seen", 0) < 60 else "🔴"
+                text += (f"{status} **Node {n['node_id']}** ({n.get('role', 'WORKER')})\n"
+                         f"├ CPU: `{n.get('cpu', 0)}%`\n├ RAM: `{n.get('ram', 0)}%`\n└ Disk:`{n.get('disk', 0)}%`\n━━━━━━━━━━━━━━━━━━━━━━\n")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_nodes")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
+        await query.message.edit_text(text, reply_markup=kb)
+        
     elif data == "owner_stats":
+        await query.answer()
         total_bots = await asyncio.to_thread(projects_col.count_documents, {"status": "RUNNING"})
         cpu = psutil.cpu_percent(interval=None)
         ram = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
-        text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 📊 CLUSTER STATISTICS ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n🖥️ **Master Node (Node 1)**\n⚡ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n💿 DISK: `{disk.percent}%`\n\n🤖 **Global Status**\n🟢 Running Bots: `{total_bots}`\n━━━━━━━━━━━━━━━━━━━━━━")
-        await query.message.reply_text(text)
-        await query.answer()
+        text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ 📊 CLUSTER STATISTICS┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+                f"🖥️ **Master Node (Node 1)**\n⚡ CPU : `{cpu}%`\n💾 RAM : `{ram.percent}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n💿 DISK: `{disk.percent}%`\n\n"
+                f"🤖 **Global Status**\n🟢 Running Bots: `{total_bots}`\n━━━━━━━━━━━━━━━━━━━━━━")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="owner_stats")], [InlineKeyboardButton("⬅️ Back to Menu", callback_data="owner_panel")]])
+        await query.message.edit_text(text, reply_markup=kb)
+
+    # 🟢 APPROVE / REJECT ACTIONS WITH ANIMATION & GITHUB TRIGGER FIX
+    elif data.startswith("approve_"):
+        await query.answer("⏳ Approving Project...", show_alert=False)
+        proj_id = ObjectId(data.split("_")[1])
+        proj = await asyncio.to_thread(projects_col.find_one, {"_id": proj_id})
         
+        old_caption = query.message.caption or "🔔 DEPLOYMENT REQUEST"
+        if "STATUS:" in old_caption:
+            old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
+
+        if proj:
+            # 1. Cool Admin Spinner Animation
+            spinners = ["◐", "◓", "◑", "◒", "✅"]
+            for spin in spinners:
+                try: 
+                    await query.message.edit_caption(f"{old_caption}\n\n⏳ **STATUS: APPROVING... {spin}**")
+                    await asyncio.sleep(0.4)
+                except: pass
+            
+            # 2. Update Database to QUEUED
+            await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "QUEUED"}})
+            
+            # 3. CRITICAL FIX: Trigger remote GitHub Action if target is a Worker Node
+            target_node = proj.get("target_node", 1)
+            if target_node != NODE_ID:
+                await trigger_github_worker(target_node)
+            
+            # 4. Final Success Text & Remove Buttons (reply_markup=None)
+            try: await query.message.edit_caption(f"{old_caption}\n\n✅ **STATUS: APPROVED & DEPLOYING!**\n🖥️ Target: Node #{target_node}", reply_markup=None)
+            except: pass
+            
+            # 5. Notify the User
+            try: await app.send_message(proj["user_id"], "🎉 Your deployment request has been **APPROVED**!\nIt is now queued for cloud deployment.\n\nClick /start to check dashboard.")
+            except: pass
+
+    elif data.startswith("reject_"):
+        await query.answer("⏳ Rejecting Project...", show_alert=False)
+        proj_id = ObjectId(data.split("_")[1])
+        proj = await asyncio.to_thread(projects_col.find_one, {"_id": proj_id})
+        
+        old_caption = query.message.caption or "🔔 DEPLOYMENT REQUEST"
+        if "STATUS:" in old_caption:
+            old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
+
+        if proj:
+            # 1. Reject Spinner Animation
+            spinners = ["◐", "◓", "◑", "◒", "❌"]
+            for spin in spinners:
+                try: 
+                    await query.message.edit_caption(f"{old_caption}\n\n⏳ **STATUS: REJECTING... {spin}**")
+                    await asyncio.sleep(0.4)
+                except: pass
+
+            # 2. Wipe Database and Cleanup
+            await asyncio.to_thread(projects_col.delete_one, {"_id": proj_id})
+            try: fs.delete(proj["file_id"])
+            except: pass
+            cleanup_workspace(proj["user_id"])
+            
+            # 3. Final Fail Text & Remove Buttons
+            try: await query.message.edit_caption(f"{old_caption}\n\n❌ **STATUS: REJECTED!**", reply_markup=None)
+            except: pass
+            
+            # 4. Notify User
+            try: await app.send_message(proj["user_id"], "❌ Your deployment request was **REJECTED** by the Admin.")
+            except: pass
+
     # CUSTOM COMMAND SELECTION
     elif data == "btn_use_default_cmd":
         await query.answer()
@@ -634,7 +700,7 @@ async def callback_handler(client, query: CallbackQuery):
         if not state: return await query.answer("Session expired.", show_alert=True)
         await query.answer("🚀 Initializing Deployment...", show_alert=False)
         
-        prog_msg = await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ MAGMA CLOUD       ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n⏳ Preparing deployment...")
+        prog_msg = await query.message.edit_text("╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃ ⚡ ANYSNAP CLOUD     ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n⏳ Preparing deployment...")
         target_node = get_best_node()
         file_id = await asyncio.to_thread(fs.put, open(state["zip_path"], "rb"), filename=f"user_{user_id}.zip")
         auto_approve = get_auto_approve()
@@ -646,11 +712,33 @@ async def callback_handler(client, query: CallbackQuery):
         result = await asyncio.to_thread(projects_col.insert_one, db_doc)
         project_id = result.inserted_id
 
+        # FORWARDING FILE TO OWNER FOR MANUAL APPROVAL
         if not auto_approve:
             await prog_msg.edit_text("⏳ Your deployment request has been sent for approval.")
-            try: await app.send_message(OWNER_ID, f"🔔 DEPLOYMENT REQUEST\n\n📦 **{state.get('project_name', 'App')}**\n👤 User: `{user_id}`\n⚡ CMD: `{state.get('run_cmd')}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]]))
-            except Exception: pass
-            USER_STATE.pop(user_id, None); cleanup_workspace(user_id); return
+            try: 
+                caption_text = (f"🔔 DEPLOYMENT REQUEST\n\n"
+                                f"📦 **{state.get('project_name', 'App')}**\n"
+                                f"👤 User: `{user_id}`\n"
+                                f"⚡ CMD: `{state.get('run_cmd')}`")
+                                
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{project_id}"), 
+                     InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{project_id}")]
+                ])
+                
+                await client.send_document(
+                    chat_id=OWNER_ID,
+                    document=state["zip_path"],
+                    file_name=f"{state.get('project_name', 'Anysnap_Project')}.zip",
+                    caption=caption_text,
+                    reply_markup=kb
+                )
+            except Exception as e: 
+                print(f"Error sending file to owner: {e}")
+                
+            USER_STATE.pop(user_id, None)
+            cleanup_workspace(user_id)
+            return
 
         anim_task = asyncio.create_task(animate_status(prog_msg, project_id, "deploy"))
 
