@@ -276,11 +276,14 @@ async def deploy_docker_container(proj_id, user_id, root, project_type, entry, e
 
 # ================= WORKER NODE LOOP =================
 async def worker_node_loop():
-    print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} ACTIVE!")
+    print(f"👷 ANYSNAP WORKER ON NODE #{NODE_ID} IS NOW ACTIVE AND LISTENING!")
     while True:
         task = await asyncio.to_thread(projects_col.find_one, {"target_node": NODE_ID, "status": "QUEUED"})
         if task:
             try:
+                # Tell dashboard that extraction has started
+                await asyncio.to_thread(projects_col.update_one, {"_id": task["_id"]}, {"$set": {"status": "EXTRACTING"}})
+                
                 work_dir = os.path.join(HOST_DIR, str(task["user_id"]))
                 os.makedirs(work_dir, exist_ok=True)
                 zip_path, extract_dir = os.path.join(work_dir, "project.zip"), os.path.join(work_dir, "extracted")
@@ -391,7 +394,7 @@ async def render_dashboard(client, message, user_id, is_edit=False):
     else:
         status = str(proj.get("status", "UNKNOWN")).upper()
         if status == "RUNNING": emoji = "🟢"
-        elif status in ["BUILDING", "STARTING", "QUEUED", "RESTARTING", "STOPPING", "DELETING"]: emoji = "🟡"
+        elif status in ["BUILDING", "STARTING", "QUEUED", "EXTRACTING", "RESTARTING", "STOPPING", "DELETING"]: emoji = "🟡"
         elif status == "STOPPED": emoji = "⚪"
         elif status == "PENDING_APPROVAL": emoji = "⏳"
         else: emoji = "🔴" 
@@ -405,9 +408,19 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             
             text = (f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n┃  🐳 ANYSNAP CLOUD    ┃\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n{emoji}  **{status}**\n━━━━━━━━━━━━━━━━━━━━━━\n🤖  `{proj.get('project_name', 'Anysnap App')}`\n⚡  `{proj.get('run_cmd', 'python main.py')}`\n\n🖥️  NODE\n└─ #{proj.get('target_node', 1)} {'MASTER' if proj.get('target_node', 1) == 1 else 'WORKER'}\n\n")
 
-            if status not in ["BUILDING", "QUEUED", "DELETING"]:
+            # LIVE BACKEND STATUS UPDATES IN DASHBOARD
+            if status == "QUEUED":
+                text += "⏳ **QUEUED:** Waiting for worker to start...\n\n"
+            elif status == "EXTRACTING":
+                text += "📦 **EXTRACTING:** Unzipping files & preparing environment...\n\n"
+            elif status == "BUILDING":
+                text += "🔧 **BUILDING:** Compiling image & installing packages (Takes time)...\n\n"
+            elif status == "STARTING":
+                text += "🚀 **STARTING:** Booting up your bot container...\n\n"
+            elif status == "DELETING":
+                text += "🗑️ **DELETING:** Cleaning up resources...\n\n"
+            else:
                 text += (f"⚡ CPU     `{get_progress_bar(cpu)}` {cpu}%\n💾 RAM     `{get_progress_bar(ram)}` {ram}%\n💿 DISK    `{get_progress_bar(disk)}` {disk}%\n\n⏱ Uptime   `{format_uptime(proj.get('started_at'))}`\n")
-            else: text += f"⚙️ Processing on backend... Please wait.\n\n"
 
             text += f"━━━━━━━━━━━━━━━━━━━━━━\n      🎛 CONTROLS"
 
@@ -424,7 +437,7 @@ async def render_dashboard(client, message, user_id, is_edit=False):
             elif status == "STOPPED":
                 kb_layout.append([InlineKeyboardButton("▶️ Start Bot", callback_data="btn_start"), InlineKeyboardButton("⚙️ Settings", callback_data="btn_settings")])
                 kb_layout.append([InlineKeyboardButton("🗑️ Delete Project", callback_data="btn_delete")])
-            elif status in ["BUILDING", "STARTING", "QUEUED", "RESTARTING", "STOPPING", "DELETING"]:
+            elif status in ["BUILDING", "STARTING", "QUEUED", "EXTRACTING", "RESTARTING", "STOPPING", "DELETING"]:
                 kb_layout.append([InlineKeyboardButton("🗑️ Force Cancel/Delete", callback_data="btn_delete")])
             
             kb_layout.append([InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_dash")])
@@ -616,28 +629,20 @@ async def callback_handler(client, query: CallbackQuery):
             old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
 
         if proj:
-            # 1. Cool Admin Spinner Animation
-            spinners = ["◐", "◓", "◑", "◒", "✅"]
-            for spin in spinners:
-                try: 
-                    await query.message.edit_caption(f"{old_caption}\n\n⏳ **STATUS: APPROVING... {spin}**")
-                    await asyncio.sleep(0.4)
-                except: pass
-            
-            # 2. Update Database to QUEUED
+            # 1. Update Database to QUEUED
             await asyncio.to_thread(projects_col.update_one, {"_id": proj_id}, {"$set": {"status": "QUEUED"}})
             
-            # 3. CRITICAL FIX: Trigger remote GitHub Action if target is a Worker Node
+            # 2. Trigger Worker if remote
             target_node = proj.get("target_node", 1)
             if target_node != NODE_ID:
                 await trigger_github_worker(target_node)
             
-            # 4. Final Success Text & Remove Buttons (reply_markup=None)
-            try: await query.message.edit_caption(f"{old_caption}\n\n✅ **STATUS: APPROVED & DEPLOYING!**\n🖥️ Target: Node #{target_node}", reply_markup=None)
+            # 3. Final Success Text & Remove Buttons (reply_markup=None)
+            try: await query.message.edit_caption(f"{old_caption}\n\n✅ **STATUS: APPROVED & QUEUED!**\n🖥️ Target: Node #{target_node}", reply_markup=None)
             except: pass
             
-            # 5. Notify the User
-            try: await app.send_message(proj["user_id"], "🎉 Your deployment request has been **APPROVED**!\nIt is now queued for cloud deployment.\n\nClick /start to check dashboard.")
+            # 4. Notify the User
+            try: await app.send_message(proj["user_id"], "🎉 Your deployment request has been **APPROVED**!\nIt is now queued for cloud deployment.\n\nClick /start to check live dashboard.")
             except: pass
 
     elif data.startswith("reject_"):
@@ -650,25 +655,17 @@ async def callback_handler(client, query: CallbackQuery):
             old_caption = old_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
 
         if proj:
-            # 1. Reject Spinner Animation
-            spinners = ["◐", "◓", "◑", "◒", "❌"]
-            for spin in spinners:
-                try: 
-                    await query.message.edit_caption(f"{old_caption}\n\n⏳ **STATUS: REJECTING... {spin}**")
-                    await asyncio.sleep(0.4)
-                except: pass
-
-            # 2. Wipe Database and Cleanup
+            # 1. Wipe Database and Cleanup
             await asyncio.to_thread(projects_col.delete_one, {"_id": proj_id})
             try: fs.delete(proj["file_id"])
             except: pass
             cleanup_workspace(proj["user_id"])
             
-            # 3. Final Fail Text & Remove Buttons
+            # 2. Final Fail Text & Remove Buttons
             try: await query.message.edit_caption(f"{old_caption}\n\n❌ **STATUS: REJECTED!**", reply_markup=None)
             except: pass
             
-            # 4. Notify User
+            # 3. Notify User
             try: await app.send_message(proj["user_id"], "❌ Your deployment request was **REJECTED** by the Admin.")
             except: pass
 
@@ -740,22 +737,14 @@ async def callback_handler(client, query: CallbackQuery):
             cleanup_workspace(user_id)
             return
 
+        # IF AUTO APPROVE IS ON, WE ONLY START THE ANIMATION (WORKER LOOP HANDLES DEPLOYMENT)
         anim_task = asyncio.create_task(animate_status(prog_msg, project_id, "deploy"))
 
-        if target_node == NODE_ID: 
-            try:
-                success, cid_or_logs, img_tag = await deploy_docker_container(project_id, user_id, state.get("root", "."), state.get("type", "python"), state.get("entry", "main.py"), state.get("env_vars", {}), state.get("run_cmd"))
-                if success: await asyncio.to_thread(projects_col.update_one, {"_id": project_id}, {"$set": {"status": "RUNNING", "container_id": cid_or_logs, "image_tag": img_tag, "started_at": time.time()}})
-                else: await asyncio.to_thread(projects_col.update_one, {"_id": project_id}, {"$set": {"status": "CRASHED", "latest_error": cid_or_logs, "image_tag": img_tag}})
-                try: fs.delete(file_id)
-                except: pass
-            except Exception as e: await asyncio.to_thread(projects_col.update_one, {"_id": project_id}, {"$set": {"status": "ERROR", "latest_error": str(e)}})
-        else: 
+        if target_node != NODE_ID: 
             await trigger_github_worker(target_node)
-
-        anim_task.cancel()
+            
+        # The background worker_node_loop will automatically pick up this QUEUED task!
         USER_STATE.pop(user_id, None); cleanup_workspace(user_id)
-        await render_dashboard(client, prog_msg, user_id, is_edit=True)
 
     elif data == "btn_restart":
         proj = await asyncio.to_thread(projects_col.find_one, {"user_id": user_id})
@@ -902,7 +891,7 @@ async def callback_handler(client, query: CallbackQuery):
         await query.answer("🗑️ Deleting Project...", show_alert=False)
         anim_task = asyncio.create_task(animate_status(query.message, proj["_id"], "delete"))
 
-        if proj.get("status") in ["DELETING", "BUILDING", "QUEUED"] or proj.get("target_node", 1) == NODE_ID:
+        if proj.get("status") in ["DELETING", "BUILDING", "QUEUED", "EXTRACTING"] or proj.get("target_node", 1) == NODE_ID:
             await asyncio.to_thread(projects_col.delete_one, {"_id": proj["_id"]})
             asyncio.create_task(cleanup_docker_images(user_id))
             cid = proj.get("container_id")
@@ -927,10 +916,11 @@ if __name__ == "__main__":
     
     print("⏳ Starting Background Tasks...")
     loop.create_task(heartbeat_loop())
+    loop.create_task(worker_node_loop()) # 🔥 FIXED: Master ab background me Worker ka bhi kaam karega!
     
     if NODE_ID == 1:
         print("👑 ANYSNAP CLOUD MASTER NODE STARTED: Listening for Telegram messages...")
         app.run() 
     else:
         print(f"👷 ANYSNAP CLOUD WORKER NODE #{NODE_ID} STARTED: Background Processing...")
-        loop.run_until_complete(worker_node_loop())
+        loop.run_forever()
